@@ -62,6 +62,12 @@ later `sent`, `delivered`, `read` or `failed` receipts received centrally. A loc
 sender's separate registry does not automatically receive those central updates.
 Telegram exposes the send API result, not a comparable delivery-receipt stream.
 
+With the kajenn 0.3.0 filesystem task store, reading a schedule while another
+thread writes it can observe incomplete JSON and raise a decoding error. A failed
+status read is inconclusive: inspect again after execution settles instead of
+replaying the message. This affects task-store status reads, independently of
+registry encryption and conversation revision checks.
+
 ## Retries and uncertain outcomes
 
 Explicit rate limiting and eligible connection-establishment failures are retried
