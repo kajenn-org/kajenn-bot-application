@@ -73,6 +73,7 @@ from kajenn.exceptions import HTTPForbidden, HTTPNotFound, HTTPUnauthorized
 from kajenn.request import Request
 from kajenn.response import Response
 from kajenn.types import Receive, Scope, Send
+from .administration import _TelegramAdministration
 from .bot import BotBaseApplication, BotInstanceGrammar
 from .telegram_conversations import _Conversations
 from .telegram_delivery import _Delivery
@@ -91,6 +92,7 @@ class TelegramBotGrammar(ApplicationGrammar):
     def telegram(
         self,
         persistence_route: str | BagResolver,
+        bot_classes: dict[str, str] | None = None,
         webhook_url: str | BagResolver | None = None,
         retry_attempts: int = 3,
         retry_delay: float = 1.0,
@@ -113,6 +115,9 @@ class TelegramBotApplication(BotBaseApplication):
 
     grammar = TelegramBotGrammar
     provider_name = "telegram"
+
+    def _make_administration(self):
+        return _TelegramAdministration(self)
 
     def _make_conversations(self):
         return _Conversations(self)
@@ -163,7 +168,7 @@ class TelegramBotApplication(BotBaseApplication):
         send-only application can use the same token without replacing its webhook.
         """
         async with self.registry_lock:
-            if not BOT_CODE.fullmatch(code):
+            if not BOT_CODE.fullmatch(code) or self._is_administration_path(code):
                 raise ValueError("invalid bot code")
             if code in self.registrations:
                 raise ValueError(f"bot already registered: {code}")
@@ -195,6 +200,9 @@ class TelegramBotApplication(BotBaseApplication):
             return bot
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if self._is_administration_path(scope["path"]):
+            await super().__call__(scope, receive, send)
+            return
         if self.webhook_url is None:
             await Response("Not Found", status_code=404)(scope, receive, send)
             return

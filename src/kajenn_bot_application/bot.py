@@ -18,6 +18,12 @@ Provider subclasses own wire formats, credential checks, recipient validation,
 activation and sends. Registry records and task identifiers remain provider-owned.
 The persistence route is application-wide; provider authentication never supplies
 application authorization. One receiving process owns each registry.
+
+Each provider mounts an administrative RoutingClass at /_admin and exposes the
+same methods through /_mcp using McpOpenApiApplication. Only server administrators
+can invoke these operations or view the administrative schema. Administration
+calls application methods directly; registered bot command routers and internal
+task entries are outside this HTTP/MCP surface.
 """
 
 from __future__ import annotations
@@ -38,6 +44,8 @@ from genro_builders.contrib.config import ConfigHandler
 from genro_routes import RoutingClass, route
 
 from kajenn.routed_application import RoutedApplication
+from kajenn.applications.mcp import McpOpenApiApplication
+from kajenn.response import Response
 from kajenn.server import BaseServer
 from kajenn.lifespan import FatalBootError
 from kajenn.tasks import new_descriptor
@@ -84,7 +92,7 @@ class _BotConfiguration(BuilderBase):
             getattr(node, name)(**attrs)
 
 
-class BotBaseApplication(RoutedApplication):
+class BotBaseApplication(McpOpenApiApplication):
     """Base for concrete messaging applications with class-owned bot grammars."""
 
     provider_name: str
@@ -95,8 +103,10 @@ class BotBaseApplication(RoutedApplication):
         persistence_route: str | None = None,
         webhook_url: str | None = None,
         client: httpx.AsyncClient | None = None,
+        bot_classes: dict[str, type | str] | None = None,
         **kwargs: Any,
     ) -> None:
+        self._bot_classes = bot_classes
         self._persistence_route = persistence_route
         self._webhook_url = webhook_url
         self._client = client
@@ -108,10 +118,41 @@ class BotBaseApplication(RoutedApplication):
         self._ready = asyncio.Event()
         self._conversations = self._make_conversations()
         self._delivery = self._make_delivery()
-        super().__init__(**kwargs)
+        kwargs.setdefault("mcp_name_segment", "_mcp")
+        kwargs.setdefault("api_name", "_admin")
+        super().__init__(routing_class=self._make_administration(), **kwargs)
+        getattr(self.route.router_at_path("_meta"), "auth").configure(rule="admin")
         self.route.add_entry(
             self.deliver_reminder, metadata={"task": self.delivery.reminder_task_name}
         )
+
+    @property
+    def bot_classes(self) -> dict[str, type | str]:
+        """Deployment-controlled aliases allowed for remote registration."""
+        if self._bot_classes is not None:
+            return self._bot_classes
+        return self.config(f"{self.provider_name}.bot_classes", default={}) or {}
+
+    def _make_administration(self) -> RoutingClass:
+        raise NotImplementedError
+
+    def _is_administration_path(self, path: str) -> bool:
+        return path.strip("/").partition("/")[0] in (
+            self.api_name, self.mcp_name_segment, "_meta"
+        )
+
+    def schema_filters(self) -> dict[str, Any]:
+        """Describe only administrative REST routes; the schema itself requires admin."""
+        return {"basepath": self.api_name, "channel_channel": self.rest_channel, "auth_tags": "admin"}
+
+    async def __call__(self, scope, receive, send) -> None:
+        """Delegate administration to REST/MCP without exposing internal task routes."""
+        if scope["path"].strip("/").partition("/")[0] == self.api_name:
+            if scope.get("method") != "POST":
+                await Response("Method Not Allowed", status_code=405,
+                               headers={"Allow": "POST"})(scope, receive, send)
+                return
+        await super().__call__(scope, receive, send)
 
     @property
     def delivery(self) -> Any:

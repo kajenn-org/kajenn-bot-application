@@ -21,7 +21,7 @@ classifiers = [
     "Framework :: AsyncIO",
 ]
 dependencies = [
-    "kajenn>=0.3.0",
+    "kajenn>=0.4.1",
     "genro-bag>=0.27.0",
     "genro-builders>=0.27.0",
     "genro-routes>=0.30.1",
