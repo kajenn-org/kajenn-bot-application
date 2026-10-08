@@ -369,8 +369,10 @@ async def test_restart_restores_windows_conversations_and_overdue_template_remin
         assert (await fresh.app.get_conversation("alpha", conversation["id"]))["state"] == "open"
         await fresh.server.tasks.scheduler.tick()
         async with asyncio.timeout(3):
-            while (await fresh.app.get_reminder(code))["delivery_state"] != "accepted":
+            while code in fresh.server.tasks.scheduler.running:
                 await asyncio.sleep(0.01)
+        assert (await fresh.app.get_reminder(code))["delivery_state"] == "accepted"
+        assert fresh.server.tasks.task_store.get(code)["last_outcome"] == "ok"
         await fresh.app.deliver_reminder(code)
         assert len([c for c in fresh.api.calls if c[0] == "POST"]) == 1
     finally:
