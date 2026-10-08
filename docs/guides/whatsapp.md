@@ -1,12 +1,15 @@
 # WhatsApp bots
 
-**Version:** 0.1 · **Last updated:** 2026-10-08 · **Status:** 🔴 DA REVISIONARE
+**Document version:** 0.1 · **Last updated:** 2026-10-08 · **Status:** 🔴 UNDER REVIEW
 
 `WhatsAppBotApplication` extends [BotBaseApplication](bots.md) and uses the official
 WhatsApp Business Cloud API. Each application mount represents one Meta app
 connection; register multiple existing business phone numbers as independent bot
 instances. Each bot is a `RoutingClass` with its own grammar and configuration.
 Use separate mounts for separate Meta app connections and persistence namespaces.
+
+For installation and environment setup, see [getting started](../getting-started.md).
+The examples below assume an initialized application and registered bot.
 
 ## Configure a receiver
 

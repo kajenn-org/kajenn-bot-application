@@ -11,3 +11,4 @@ build/
 *.egg-info/
 docs/_build/
 .DS_Store
+coverage.xml

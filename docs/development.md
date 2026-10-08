@@ -1,6 +1,6 @@
 # Development and releases
 
-**Version:** 0.1 · **Last updated:** 2026-10-08 · **Status:** 🔴 DA REVISIONARE
+**Document version:** 0.1 · **Last updated:** 2026-10-08 · **Status:** 🔴 UNDER REVIEW
 
 ## Dependency boundary
 
@@ -45,9 +45,24 @@ Before the first release, configure a PyPI Trusted Publisher for
 The repository's release environment can require manual approval.
 No package is published merely by pushing branches.
 
-Read the Docs configuration is included in `.readthedocs.yaml`. Connect this
-repository to a Read the Docs project to host the Sphinx guide; CI builds the same
-guide without requiring that external setup.
+## Documentation and coverage services
+
+[Read the Docs](https://kajenn-bot-application.readthedocs.io/en/latest/) builds
+the English Sphinx guide using `.readthedocs.yaml`, with warnings treated as
+errors. `latest` follows `main`; pull requests have preview builds. The same
+documentation command runs in CI, so broken internal references fail before
+publication. Source links point to this repository's `docs/` tree.
+
+The test job produces `coverage.xml`. One canonical Python 3.11/latest-server
+job uploads it to [Codecov](https://app.codecov.io/gh/kajenn-org/kajenn-bot-application).
+The other matrix jobs still run the complete suite; they do not duplicate uploads.
+Coverage paths map installed-wheel sources back to `src/kajenn_bot_application`.
+
+Uploads use the official [Codecov action's OIDC authentication](https://github.com/codecov/codecov-action#using-oidc)
+with GitHub's short-lived identity token. No repository upload secret is required.
+Upload failures fail that CI job instead of silently leaving an outdated badge.
+`codecov.yml` disables automated pull-request comments; checks and the dashboard
+remain available. README badges track `main` and the `latest` documentation build.
 
 The released kajenn 0.3.0 lifecycle hooks are annotated as synchronous although
 the server awaits asynchronous hooks. Advisory mypy reports three override
