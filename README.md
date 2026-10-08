@@ -1,73 +1,132 @@
 # kajenn-bot-application
 
-**Version:** 0.1 · **Last updated:** 2026-10-08 · **Status:** 🔴 DA REVISIONARE
+**Document version:** 0.2 · **Last updated:** 2026-10-08 · **Status:** 🔴 UNDER REVIEW
 
-Telegram and WhatsApp bot applications for [kajenn](https://github.com/kajenn-org/kajenn),
-with their own package, tests and release cycle. Based on genropy history and genro-modules.
+[![Tests](https://github.com/kajenn-org/kajenn-bot-application/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/kajenn-org/kajenn-bot-application/actions/workflows/tests.yml)
+[![Documentation](https://readthedocs.org/projects/kajenn-bot-application/badge/?version=latest)](https://kajenn-bot-application.readthedocs.io/en/latest/)
+[![Coverage](https://codecov.io/gh/kajenn-org/kajenn-bot-application/branch/main/graph/badge.svg)](https://app.codecov.io/gh/kajenn-org/kajenn-bot-application)
+[![Python](https://img.shields.io/badge/python-3.11%E2%80%933.14-blue)](https://github.com/kajenn-org/kajenn-bot-application/blob/main/pyproject.toml)
+[![License](https://img.shields.io/github/license/kajenn-org/kajenn-bot-application)](LICENSE)
 
-`BotBaseApplication` provides bot registration, conversations, optional administrator
-approval, announcements and reminders. `TelegramBotApplication` and
-`WhatsAppBotApplication` provide each platform's webhook and outbound API.
+**Run Telegram and WhatsApp bots as kajenn applications. Receive centrally, send
+from local services, and keep each bot's configuration and conversations separate.**
 
-Multiple bot instances can share a class while keeping separate credentials,
-configuration and datasets. A central deployment receives webhooks; a local
-deployment can send directly using the same application with send-only configuration.
-Persistence is delegated to one application-level route. Encrypted filesystem
-providers are included as examples.
+Use it for developer notifications, review conversations, administrator-approved
+access, announcements and scheduled follow-ups. Bot behavior lives in ordinary
+`RoutingClass` methods; configuration uses class-owned grammars.
+
+[Read the documentation](https://kajenn-bot-application.readthedocs.io/en/latest/)
+· [Getting started](https://kajenn-bot-application.readthedocs.io/en/latest/getting-started.html)
+· [API reference](https://kajenn-bot-application.readthedocs.io/en/latest/api.html)
+
+## What it provides
+
+| Capability | Telegram | WhatsApp Business |
+|---|---|---|
+| Receive events | Secret-checked webhook | Signed webhook and verification handshake |
+| Send from a local service | Same bot token; known reachable chat | Same business credentials; template or known service window |
+| Multiple bot instances | Independent BotFather tokens and configuration | Independent business numbers and configuration |
+| Conversations | Multiple participants, correlated replies and buttons | Multiple participants, correlated replies and buttons |
+| Optional admission | First/all administrator approval; edits settled requests | First/all approval; follow-up notices and optional templates |
+| Outbound content | Text, files, media, typing and native polls | Text, files, media, buttons and approved templates |
+| Background work | Queued announcements and persistent reminders | Queued announcements and persistent reminders |
+| Delivery information | Send API result and task outcome | API acceptance plus webhook receipts |
+
+`BotBaseApplication` owns shared registration, conversation and task behavior.
+`TelegramBotApplication` and `WhatsAppBotApplication` preserve each provider's
+capabilities and constraints. Persistence is delegated to one route per application;
+encrypted filesystem providers are included in the examples.
 
 ## Install
 
-From a checkout, with Python 3.11 or newer:
+Python **3.11–3.14** is tested. `kajenn>=0.3.0` is installed as a dependency.
+Bot versions and releases are independent from the server.
+
+Install from this repository (no PyPI release is required):
 
 ```bash
+git clone https://github.com/kajenn-org/kajenn-bot-application.git
+cd kajenn-bot-application
+python -m venv .venv
+source .venv/bin/activate
 python -m pip install .
 ```
 
-The distribution is `kajenn-bot-application`; the import package is
-`kajenn_bot_application`:
+On Windows, activate the environment with `.venv\Scripts\Activate.ps1`.
+The distribution is named `kajenn-bot-application`; Python imports use
+`kajenn_bot_application`. No kajenn source checkout is needed.
 
 ```python
 from kajenn_bot_application import TelegramBotApplication, WhatsAppBotApplication
 ```
 
-The package depends on `kajenn>=0.3.0`. The server does not depend on this package.
-Installation does not require a kajenn source checkout or changes to the server.
+## Run your first bot
 
-## Documentation and examples
-
-- [Shared architecture and capabilities](docs/guides/bots.md)
-- [Telegram configuration, persistence and APIs](docs/guides/telegram.md)
-- [WhatsApp configuration, templates and delivery receipts](docs/guides/whatsapp.md)
-- [Package boundary, development and releases](docs/development.md)
-- [Extraction and import migration](docs/migration.md)
-
-Run the recipes from the repository root after configuring the secrets described
-in each guide:
+The [getting started guide](https://kajenn-bot-application.readthedocs.io/en/latest/getting-started.html)
+walks through credentials, persistent storage, the public webhook and the first
+`/hello` reply. From the repository root, after configuring that environment:
 
 ```bash
-kajenn serve examples/telegram_bot/config.py
-kajenn serve examples/whatsapp_bot/config.py
+kajenn serve examples/telegram_bot/config.py --port 8000
+# Or run the WhatsApp example:
+kajenn serve examples/whatsapp_bot/config.py --port 8000
 ```
 
-Each example also has `local_config.py` for sending without a webhook. Platform
-limits remain distinct: Telegram private chats require prior user interaction;
-WhatsApp notifications outside the service window require approved templates.
+Both examples provide `/hello` and `/echo`. Each has a `local_config.py` recipe
+that sends directly without replacing the central webhook. Within an initialized
+application, a local job can notify a user:
 
-## Development
+```python
+telegram = server.applications["telegram"]
+await telegram.send_message("alpha", mario_chat_id, "You have a new PR")
+```
+
+The bot must already be registered, and Mario must have started a private chat
+with it. The local service needs the bot token, not only the chat ID. Replies go
+to the central webhook. WhatsApp notifications use approved templates outside
+the known customer service window.
+
+## Learn and deploy
+
+| Task | Guide |
+|---|---|
+| Install, configure and get the first reply | [Getting started](https://kajenn-bot-application.readthedocs.io/en/latest/getting-started.html) |
+| Understand classes, instances and application mounts | [Architecture](docs/guides/bots.md) |
+| Write commands and instance configuration | [Writing a bot](docs/guides/writing-bots.md) |
+| Coordinate concurrent requests and approvals | [Conversation recipes](docs/guides/conversations.md) |
+| Configure Telegram or WhatsApp features | [Telegram](docs/guides/telegram.md) · [WhatsApp](docs/guides/whatsapp.md) |
+| Run, recover and diagnose a deployment | [Operations](docs/guides/operations.md) |
+| Replace filesystem storage with application persistence | [Persistence](docs/guides/persistence.md) |
+| Move imports from the original kajenn branch | [Migration](docs/migration.md) |
+
+## Scope and delivery guarantees
+
+This package uses official bot/business APIs. It does not provide personal-account
+sessions, group history imports, automatic application-user provisioning, or a
+public bot-management API. Admission does not grant kajenn router permissions.
+
+The filesystem examples support **one receiving process per registry**. Webhook
+acknowledgement means work has been staged, not that a reply was delivered.
+Provider sends and persistence writes are separate operations; delivery is not
+exactly once. See the operations guide before replaying failed or uncertain work.
+
+## Contributing
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
 python -m pip install -e ".[dev,docs]"
 git config core.hooksPath hooks
 pytest -q
 ruff check src tests examples tools
 python tools/check_boundary.py
 sphinx-build -W -b html docs docs/_build/html
-python -m build
 ```
 
-Tests use real kajenn routing, tasks and encrypted storage; only provider HTTP
-calls are mocked. No Telegram or Meta credentials are needed to run the suite.
+CI installs the built wheel, runs the integration suite on Python 3.11–3.14,
+checks the minimum kajenn version, uploads coverage to Codecov and builds the
+documentation with warnings treated as errors. Provider HTTP is mocked; routing,
+tasks and encrypted persistence use the real server services.
 
-Licensed under Apache-2.0. Copyright Softwell S.r.l.
+Changes go through pull requests to `develop`. See
+[development and releases](docs/development.md) for the package boundary and checks.
+
+Apache-2.0 · Copyright Softwell S.r.l. · Based on genropy history and genro-modules.

@@ -1,6 +1,6 @@
 # Telegram bots
 
-**Version:** 0.4 · **Last updated:** 2026-10-08 · **Status:** 🔴 DA REVISIONARE
+**Document version:** 0.4 · **Last updated:** 2026-10-08 · **Status:** 🔴 UNDER REVIEW
 
 `TelegramBotApplication` hosts independently configured `RoutingClass` bot
 instances. Each instance uses a BotFather token. A receiving deployment owns a
@@ -9,9 +9,14 @@ Multiple instances can use the same class.
 There is no polling transport. `TelegramBotApplication` inherits the shared
 `BotBaseApplication`; its public configuration and persisted records remain compatible.
 
+For a complete first run, see [getting started](../getting-started.md).
+The examples below assume an initialized application and registered bot.
+
 ## Configure the application
 
 ```python
+from kajenn_bot_application import TelegramBotApplication
+
 app = cfg.applications().application(
     code="telegram", app_class=TelegramBotApplication,
 )

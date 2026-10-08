@@ -1,0 +1,2 @@
+# Coverage is reported through checks and the dashboard, without PR comments.
+comment: false

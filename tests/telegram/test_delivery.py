@@ -149,8 +149,10 @@ async def test_reminder_survives_registration_restore_and_is_sent_once(setup):
     server.tasks.task_store.save(row)
     await server.tasks.scheduler.tick()
     async with asyncio.timeout(3):
-        while (await app.get_reminder(code))["delivery_state"] != "sent":
+        while code in server.tasks.scheduler.running:
             await asyncio.sleep(0.01)
+    assert (await app.get_reminder(code))["delivery_state"] == "sent"
+    assert server.tasks.task_store.get(code)["last_outcome"] == "ok"
     await app.deliver_reminder(code)
     assert len([p for m, p in api.calls if m == "sendMessage" and p["text"] == "Remember"]) == 1
 

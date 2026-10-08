@@ -77,8 +77,10 @@ async def test_poll_and_reminder_restore_with_real_storage(tmp_path):
         assert files and all(b"Ship?" not in f.read_bytes() for f in files)
         await fresh.tasks.scheduler.tick()
         async with asyncio.timeout(3):
-            while (await restored.get_reminder(code))["delivery_state"] != "sent":
+            while code in fresh.tasks.scheduler.running:
                 await asyncio.sleep(0.01)
+        assert (await restored.get_reminder(code))["delivery_state"] == "sent"
+        assert fresh.tasks.task_store.get(code)["last_outcome"] == "ok"
         await restored.deliver_reminder(code)
         assert (
             len([p for m, p in api.calls if m == "sendMessage" and p["text"] == "Ship tomorrow"])

@@ -1,6 +1,6 @@
 # Extracting the bot applications
 
-**Version:** 0.1 · **Last updated:** 2026-10-08 · **Status:** 🔴 DA REVISIONARE
+**Document version:** 0.1 · **Last updated:** 2026-10-08 · **Status:** 🔴 UNDER REVIEW
 
 The owner selected a separate repository on 2026-10-08 to decouple bot releases
 from server releases. The initial source is kajenn commit

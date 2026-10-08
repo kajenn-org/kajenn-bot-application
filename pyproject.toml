@@ -44,7 +44,7 @@ docs = ["sphinx>=7.0", "sphinx-rtd-theme>=2.0", "myst-parser>=2.0"]
 [project.urls]
 Repository = "https://github.com/kajenn-org/kajenn-bot-application"
 "Bug Tracker" = "https://github.com/kajenn-org/kajenn-bot-application/issues"
-Documentation = "https://github.com/kajenn-org/kajenn-bot-application/tree/develop/docs"
+Documentation = "https://kajenn-bot-application.readthedocs.io/en/latest/"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kajenn_bot_application"]
@@ -71,3 +71,8 @@ warn_return_any = true
 warn_unused_configs = true
 follow_imports = "silent"
 ignore_missing_imports = true
+
+# Wheel-based tests execute site-packages code. Map those paths to the repository
+# so coverage uploads link to the same source files as editable local runs.
+[tool.coverage.paths]
+source = ["src/kajenn_bot_application", "*/site-packages/kajenn_bot_application"]

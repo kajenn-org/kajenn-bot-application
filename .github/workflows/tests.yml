@@ -9,6 +9,9 @@ permissions:
   contents: read
 jobs:
   test:
+    permissions:
+      contents: read
+      id-token: write
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -32,7 +35,15 @@ jobs:
       - run: python -m pip check
       - run: ruff check src tests examples tools
       - run: python tools/check_boundary.py
-      - run: python -m pytest -q
+      - run: python -m pytest -q --cov-report=xml:coverage.xml
+      - name: Upload coverage to Codecov
+        if: matrix.python == '3.11' && matrix.server == 'latest'
+        uses: codecov/codecov-action@04b047e8bb82a0c002c8312c1c880fbc6a999d45 # v5
+        with:
+          use_oidc: true
+          files: coverage.xml
+          disable_search: true
+          fail_ci_if_error: true
       - if: matrix.python == '3.11' && matrix.server == 'latest'
         run: sphinx-build -W -b html docs docs/_build/html
       - if: matrix.python == '3.11' && matrix.server == 'latest'
