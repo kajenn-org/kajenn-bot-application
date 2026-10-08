@@ -40,7 +40,10 @@ bot and update IDs. Receipts deduplicate for 48 hours even after spool cleanup;
 expired receipts are pruned on startup and ingress. The task resolves the
 bot's command route with anonymous auth filters: provider credentials authenticate
 delivery, never the sender's application identity. Protected commands stay closed.
-Handlers receive ``text`` (the command tail) and return text or None.
+Handlers receive the declared parameters among ``text`` (the command tail),
+``sender`` (a deep copy of the Telegram user dictionary, or an empty dictionary
+when absent) and ``chat_id`` (the originating chat). Extra parameters are dropped;
+handlers accepting **kwargs receive all three. Handlers return text or None.
 
 Message commands, conversation text and inline callbacks are staged before ACK.
 Conversation state and admission decisions use the same persistence route, with
@@ -337,7 +340,12 @@ class TelegramBotApplication(BotBaseApplication):
             return
         try:
             node = bot.route.node(command, errors=self.ROUTER_ERRORS)
-            result = await self._call(node, text=text)
+            kwargs = self.spread_over_params(node, {
+                "text": text,
+                "sender": copy.deepcopy(message.get("from", {})),
+                "chat_id": chat_id,
+            })
+            result = await self._call(node, **kwargs)
         except (HTTPNotFound, HTTPUnauthorized, HTTPForbidden):
             return
         if result is not None:

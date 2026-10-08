@@ -100,8 +100,11 @@ dictionaries. This first version accepts a flat set of elements. Grammar
 defaults apply through `config("settings.greeting")`; unknown elements and
 attributes are refused. Each registration creates a new router instance.
 
-Command handlers accept `text`, the text after the command, and return a string
-or `None`. Sync handlers run in the server pool; async handlers run on its loop.
+Command handlers can declare `text` (the text after the command), `sender`
+(a deep copy of Telegram's `message.from`, or `{}` when absent), and `chat_id`
+(the originating chat). Undeclared parameters are dropped; `**kwargs` receives
+all three. Existing handlers accepting only `text` keep working. Handlers return
+a string or `None`. Sync handlers run in the server pool; async handlers run on its loop.
 Commands addressed to another bot are ignored. Other text can continue a conversation.
 Routing's auth plugin remains active: Telegram webhook verification authenticates
 the delivery only. There is no sender-to-avatar resolver in this small example,
@@ -320,7 +323,7 @@ through more than one chat.
 The bot route receives `text`, `sender` (Telegram user data), `conversation`
 (a snapshot), and `action` (the button action, or an empty string for a text reply).
 It returns text to the same participant or `None`. `DemoBot.conversation` provides
-a small PR example. Command routes retain their existing `text` signature.
+a small PR example. Command routes can also declare `sender` and `chat_id`.
 Handlers that close a conversation should return `None` and send any final text
 before closing it.
 
