@@ -1,10 +1,11 @@
 # kajenn-bot-application
 
-**Document version:** 0.2 · **Last updated:** 2026-10-08 · **Status:** 🔴 UNDER REVIEW
+**Document version:** 0.3 · **Last updated:** 2026-10-08 · **Status:** 🔴 UNDER REVIEW
 
 [![Tests](https://github.com/kajenn-org/kajenn-bot-application/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/kajenn-org/kajenn-bot-application/actions/workflows/tests.yml)
 [![Documentation](https://readthedocs.org/projects/kajenn-bot-application/badge/?version=latest)](https://kajenn-bot-application.readthedocs.io/en/latest/)
 [![Coverage](https://codecov.io/gh/kajenn-org/kajenn-bot-application/branch/main/graph/badge.svg)](https://app.codecov.io/gh/kajenn-org/kajenn-bot-application)
+[![PyPI](https://img.shields.io/pypi/v/kajenn-bot-application)](https://pypi.org/project/kajenn-bot-application/)
 [![Python](https://img.shields.io/badge/python-3.11%E2%80%933.14-blue)](https://github.com/kajenn-org/kajenn-bot-application/blob/main/pyproject.toml)
 [![License](https://img.shields.io/github/license/kajenn-org/kajenn-bot-application)](LICENSE)
 
@@ -42,13 +43,19 @@ encrypted filesystem providers are included in the examples.
 Python **3.11–3.14** is tested. `kajenn>=0.3.0` is installed as a dependency.
 Bot versions and releases are independent from the server.
 
-Install from this repository (no PyPI release is required):
+Install the published package in a virtual environment:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install kajenn-bot-application
+```
+
+To run the included examples or contribute, clone the repository and install it:
 
 ```bash
 git clone https://github.com/kajenn-org/kajenn-bot-application.git
 cd kajenn-bot-application
-python -m venv .venv
-source .venv/bin/activate
 python -m pip install .
 ```
 

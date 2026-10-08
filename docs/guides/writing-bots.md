@@ -83,9 +83,34 @@ Pass credentials through your deployment's secret mechanism rather than literals
 
 | Handler | Inputs | Return value |
 |---|---|---|
-| Command | `text`: everything after `/command` | A reply string or `None` |
+| Telegram command | `text`: everything after `/command`; `sender`: copied Telegram user data; `chat_id`: originating chat | A reply string or `None` |
+| WhatsApp command | `text`: everything after `/command`; `sender`: copied normalized user data; `chat_id`: reply destination | A reply string or `None` |
 | Conversation | `text`, provider `sender`, conversation snapshot, `action` | A reply to the same participant, or `None` |
 | Telegram poll callback | `event`, persisted `poll` snapshot | Return value is not sent as a reply |
+
+Commands on both providers receive only the parameters they declare; `**kwargs`
+receives all three. Existing `text`-only methods keep working. `sender` is a deep
+copy, so handler changes do not modify the incoming event.
+
+For Telegram, `sender` contains `message.from`, or `{}` when no sender is present.
+In a group, `sender["id"]` identifies the user while `chat_id` identifies the group.
+For WhatsApp, `sender` is the normalized `{"id": "..."}` dictionary and `chat_id`
+is the reply destination. Both IDs are strings containing the WhatsApp ID or
+BSUID supplied by the provider; they are equal for the supported direct messages.
+Neither provider's metadata establishes a kajenn identity or grants permissions.
+
+For example, a bot on either provider can expose:
+
+```python
+@route()
+def who(self, sender, chat_id, text=""):
+    if not sender.get("id"):
+        return "No user identity is available for this message."
+    return f"User {sender['id']} in chat {chat_id}"
+```
+
+Use the sender ID to look up an explicitly linked application account before
+acting on its behalf. Usernames and display names are not account credentials.
 
 Synchronous methods run through the kajenn worker pool. Asynchronous methods run
 on the event loop; do not perform blocking work inside them. Exceptions appear
