@@ -19,6 +19,13 @@ map account/phone-number pairs to registered bot instances. Supported events are
 staged before ACK, with eight-day receipts. Unknown numbers and unsupported event
 kinds are ignored; malformed supported payloads return 400 before staging.
 
+Command handlers receive the declared parameters among ``text`` (the command
+tail), ``sender`` (a deep copy of the normalized user dictionary) and ``chat_id``
+(the reply destination). Both sender ID and chat ID remain strings. Extra
+parameters are dropped; handlers accepting ``**kwargs`` receive all three.
+Sender metadata does not grant router permissions or establish an application
+identity. Handlers return a reply string or None.
+
 The API version is explicit. Send-only deployments need no app secret or verify
 token and never change remote subscriptions. Existing numbers and access tokens
 must be provisioned in Meta; registration validates access, not remote onboarding.
@@ -383,7 +390,12 @@ class WhatsAppBotApplication(BotBaseApplication):
         if command:
             try:
                 node = self.get_bot(bot_code).route.node(command[1], errors=self.ROUTER_ERRORS)
-                result = await self._call(node, text=command[2] or "")
+                kwargs = self.spread_over_params(node, {
+                    "text": command[2] or "",
+                    "sender": copy.deepcopy(event["sender"]),
+                    "chat_id": event["destination"],
+                })
+                result = await self._call(node, **kwargs)
             except (HTTPNotFound, HTTPUnauthorized, HTTPForbidden):
                 return
             if result is not None:

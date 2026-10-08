@@ -14,8 +14,12 @@
 
 """Contract: authenticated WhatsApp batches, encrypted persistence and local sending."""
 
+import copy
+import time
+
 import httpx
 import pytest
+from genro_routes import route
 from kajenn_bot_application.bot import BotBaseApplication
 from kajenn_bot_application.whatsapp import WhatsAppBotApplication
 from examples.whatsapp_bot import DemoBot
@@ -84,3 +88,100 @@ async def test_local_sender_requires_template_without_window_and_never_subscribe
     assert sent["status"] == "accepted"
     assert wa.api.calls[-1][2]["type"] == "template"
     assert all("subscribed_apps" not in path for _, path, _ in wa.api.calls)
+
+
+class SenderBot(DemoBot):
+    """Commands selecting the normalized WhatsApp sender and destination."""
+
+    @route()
+    def identity(self, text: str, sender: dict, chat_id: str) -> str:
+        assert sender == {"id": chat_id}
+        return f"{sender['id']}:{chat_id}:{text}"
+
+    @route()
+    async def identity_async(self, text, *, sender, chat_id):
+        return f"{sender['id']}:{chat_id}:{text}"
+
+    @route()
+    def sender_only(self, sender):
+        return sender["id"]
+
+    @route()
+    def chat_only(self, chat_id):
+        return chat_id
+
+    @route()
+    def no_context(self):
+        return "ready"
+
+    @route()
+    def all_context(self, **kwargs):
+        assert set(kwargs) == {"text", "sender", "chat_id"}
+        return f"{kwargs['sender']['id']}:{kwargs['chat_id']}:{kwargs['text']}"
+
+    @route()
+    def edit_sender(self, sender):
+        sender["id"] = "399999"
+        sender["extra"]["nested"].append("handler change")
+        return "updated"
+
+    @route(auth_rule="admin")
+    def restricted(self, sender, chat_id):
+        raise AssertionError("Sender data must not grant router permissions")
+
+
+@pytest.mark.parametrize("user", ["391234", "IT.123456789"])
+@pytest.mark.parametrize(("command", "reply"), [
+    ("identity", "{user}:{user}:hello"),
+    ("identity_async", "{user}:{user}:hello"),
+    ("sender_only", "{user}"),
+    ("chat_only", "{user}"),
+    ("no_context", "ready"),
+    ("all_context", "{user}:{user}:hello"),
+    ("echo", "hello"),
+    ("restricted", None),
+])
+async def test_command_context_through_signed_webhook_and_tasks(wa, user, command, reply):
+    await wa.app.on_startup()
+    await wa.app.register_bot(
+        code="alpha", bot_class=SenderBot, token="secret-alpha",
+        phone_number_id="1001", business_account_id="900",
+    )
+    payload = wa.payload(f"/{command} hello", user=user)
+    if user.startswith("IT."):
+        message = payload["entry"][0]["changes"][0]["value"]["messages"][0]
+        message["from_user_id"] = message.pop("from")
+    assert (await wa.post(payload)).status_code == 200
+    assert not [call for call in wa.api.calls if call[0] == "POST"]
+    await drain(wa.server)
+    sends = [data for method, _, data in wa.api.calls if method == "POST"]
+    if reply is None:
+        assert sends == []
+    else:
+        assert len(sends) == 1
+        assert sends[0]["text"]["body"] == reply.format(user=user)
+        if user.startswith("IT."):
+            assert sends[0]["recipient"] == user
+        else:
+            assert sends[0]["to"] == user
+
+
+async def test_command_sender_is_a_deep_copy_and_cannot_redirect_reply(wa):
+    await wa.app.on_startup()
+    await wa.app.register_bot(
+        code="alpha", bot_class=SenderBot, token="secret-alpha",
+        phone_number_id="1001", business_account_id="900",
+    )
+    event = {
+        "kind": "message", "message_id": "wamid.in1", "timestamp": time.time(),
+        "sender": {"id": "391234", "extra": {"nested": []}},
+        "destination": "391234", "supported": True, "action": "",
+        "text": "/edit_sender", "reply_id": None,
+    }
+    original = copy.deepcopy(event)
+    await wa.app.deliver_update("alpha", event)
+    assert event == original
+    sends = [data for method, _, data in wa.api.calls if method == "POST"]
+    assert len(sends) == 1
+    assert sends[0]["to"] == "391234"
+    assert sends[0]["text"]["body"] == "updated"

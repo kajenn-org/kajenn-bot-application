@@ -77,8 +77,16 @@ are local metadata, not changes to the WhatsApp business profile.
 The example handles `/hello` and `/echo text`. These are application text commands,
 not native WhatsApp command registration. Sync handlers use the server pool;
 async handlers run on its loop. Replies use `send_text` and split when needed.
-Telegram's command behavior remains unchanged. Router authorization remains
-active: webhook signatures and bot admission do not supply application roles.
+Command handlers can declare `text` (the command tail), `sender` (a deep copy
+of the normalized `{"id": "..."}` dictionary), and `chat_id` (the reply destination).
+Undeclared parameters are dropped; `**kwargs` receives all three, so existing
+`text`-only handlers keep working. `sender["id"]` and `chat_id` remain strings,
+including when the provider supplies a BSUID. They are equal for supported direct
+messages. The normalized sender does not include contact profile fields.
+
+Router authorization remains active: webhook signatures, sender metadata and bot
+admission do not supply application roles. Mapping a sender to an explicitly
+linked application account belongs to the bot.
 
 ## Send locally and receive centrally
 
