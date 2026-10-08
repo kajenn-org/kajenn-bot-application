@@ -141,9 +141,17 @@ class BotBaseApplication(McpOpenApiApplication):
             self.api_name, self.mcp_name_segment, "_meta"
         )
 
-    def schema_filters(self) -> dict[str, Any]:
-        """Describe only administrative REST routes; the schema itself requires admin."""
-        return {"basepath": self.api_name, "channel_channel": self.rest_channel, "auth_tags": "admin"}
+    async def discover(self, scope, **kwargs: Any) -> dict[str, Any]:
+        """Describe administration using the caller filters supplied by kajenn.
+
+        Full application discovery preserves the mounted REST path. MCP requests
+        the mounted subtree explicitly and receives its relative tool names.
+        """
+        if kwargs.get("basepath"):
+            return await super().discover(scope, **kwargs)
+        kwargs["basepath"] = self.api_name
+        nodes = await super().discover(scope, **kwargs)
+        return {"routers": {self.api_name: nodes}}
 
     async def __call__(self, scope, receive, send) -> None:
         """Delegate administration to REST/MCP without exposing internal task routes."""

@@ -186,6 +186,8 @@ async def test_openapi_documents_admin_routes_and_hides_task_routes(admin):
     assert "/_admin/send_message" in paths
     assert all(path.startswith("/_admin/") for path in paths)
     assert "post" in paths["/_admin/send_message"]
+    tools = (await admin.mcp("tools/list"))["result"]["tools"]
+    assert set(paths) == {f"/_admin/{tool['name']}" for tool in tools}
     for path in ("deliver_update", "deliver_reminder", "deliver_announcement"):
         assert (await admin.client.post(f"/bots/{path}", json={})).status_code == 404
         assert "error" in await admin.call(path)
