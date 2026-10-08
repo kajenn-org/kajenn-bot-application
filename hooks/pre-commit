@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+ruff check src tests examples tools
+mypy src || printf '%s\n' 'mypy findings are advisory.'
+python tools/check_boundary.py

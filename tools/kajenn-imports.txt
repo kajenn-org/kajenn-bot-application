@@ -1,0 +1,10 @@
+# Runtime dependency surface on kajenn.
+kajenn.application
+kajenn.exceptions
+kajenn.lifespan
+kajenn.request
+kajenn.response
+kajenn.routed_application
+kajenn.server
+kajenn.tasks
+kajenn.types
