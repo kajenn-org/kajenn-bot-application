@@ -41,6 +41,7 @@ interchangeable.
    :caption: Configure and operate
 
    guides/telegram
+   guides/telegram-account
    guides/whatsapp
    guides/persistence
    guides/administration

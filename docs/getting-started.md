@@ -18,7 +18,7 @@ python -m pip install .
 
 These are POSIX shell commands. On Windows, use `.venv\Scripts\Activate.ps1`
 and the equivalent environment-variable syntax in PowerShell.
-Installation brings in `kajenn>=0.3.0`; no sibling server checkout is required.
+Installation brings in `kajenn>=0.4.1`; no sibling server checkout is required.
 The examples are part of the source checkout, not the installed wheel.
 
 ## Prepare durable storage

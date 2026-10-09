@@ -39,6 +39,17 @@ access, announcements and scheduled follow-ups. Bot behavior lives in ordinary
 capabilities and constraints. Persistence is delegated to one route per application;
 encrypted filesystem providers are included in the examples.
 
+## Personal Telegram accounts
+
+`TelegramAccountApplication` is a separate application in this same package.
+It connects a personal account through MTProto and exposes permitted history,
+search, sending, channel/group creation and membership administration through
+REST/MCP. Sessions are encrypted locally; grants default to deny. Login stays
+local and policy management is restricted to an administrator.
+
+See the [personal account guide](docs/guides/telegram-account.md). This feature
+is available on the development branch containing it, not in published 0.1.0.
+
 ## Install
 
 Python **3.11–3.14** is tested. `kajenn>=0.4.1` is installed as a dependency.

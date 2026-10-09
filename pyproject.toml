@@ -26,6 +26,9 @@ dependencies = [
     "genro-builders>=0.27.0",
     "genro-routes>=0.30.1",
     "httpx>=0.27",
+    "Telethon>=1.45,<2",
+    "cryptography>=42.0",
+    "filelock>=3.16",
 ]
 
 [project.optional-dependencies]
