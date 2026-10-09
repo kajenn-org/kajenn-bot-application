@@ -55,13 +55,6 @@ class FakeTelegram:
     def is_connected(self):
         return self.connected
 
-    async def is_user_authorized(self):
-        try:
-            await self(functions.updates.GetStateRequest())
-        except errors.RPCError:
-            return False
-        return True
-
     async def get_me(self):
         return self.me
 

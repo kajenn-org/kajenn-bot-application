@@ -693,12 +693,11 @@ async def test_unchanged_operations_and_restart_do_not_rewrite_encrypted_state(a
     app, _, _ = account
     await app.set_policy({"operations": ["*"], "chats": {"*": ["read", "write"]}})
     original = app.session_path.read_bytes()
-    with patch.object(app.store, "save", wraps=app.store.save) as save:
-        await app.get_messages(CHAT)
-        await app.get_members(CHAT)
-        await app.send_text(CHAT, "hello")
-        await app.set_policy(app.policy)
-        save.assert_not_called()
+    await app.get_messages(CHAT)
+    await app.get_members(CHAT)
+    await app.send_text(CHAT, "hello")
+    await app.set_policy(app.policy)
+    assert app.session_path.read_bytes() == original
     await app.on_shutdown()
     await app.on_startup()
     assert app.session_path.read_bytes() == original
