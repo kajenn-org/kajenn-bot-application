@@ -41,9 +41,7 @@ encrypted filesystem providers are included in the examples.
 
 ## Install
 
-Python **3.11–3.14** is tested. This development branch requires the upcoming
-kajenn release with unified discovery. The `kajenn>=0.4.1` dependency floor
-is provisional; see the [administration guide](docs/guides/administration.md).
+Python **3.11–3.14** is tested. `kajenn>=0.4.1` is installed as a dependency.
 Bot versions and releases are independent from the server.
 
 Install the published package in a virtual environment:

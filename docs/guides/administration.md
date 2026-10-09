@@ -2,9 +2,8 @@
 
 **Document version:** 0.1 · **Last updated:** 2026-10-08 · **Status:** 🔴 UNDER REVIEW
 
-This interface requires kajenn's unified `discover(scope)` API for OpenAPI and
-MCP. The dependency floor of 0.4.1 is provisional until the upstream release
-containing that API is published; published kajenn 0.4.0 does not provide it.
+This interface requires kajenn 0.4.1 or newer, providing the unified
+`discover(scope)` API for OpenAPI and MCP.
 
 The application limits discovery to its administrative branch. kajenn applies
 the authenticated caller's filters for both schema generation and MCP tool
