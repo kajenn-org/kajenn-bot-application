@@ -1,5 +1,6 @@
 # Runtime dependency surface on kajenn.
 kajenn.application
+kajenn.applications.mcp
 kajenn.exceptions
 kajenn.lifespan
 kajenn.request

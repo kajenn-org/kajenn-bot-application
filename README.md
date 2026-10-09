@@ -31,6 +31,7 @@ access, announcements and scheduled follow-ups. Bot behavior lives in ordinary
 | Optional admission | First/all administrator approval; edits settled requests | First/all approval; follow-up notices and optional templates |
 | Outbound content | Text, files, media, typing and native polls | Text, files, media, buttons and approved templates |
 | Background work | Queued announcements and persistent reminders | Queued announcements and persistent reminders |
+| Administration | REST/OpenAPI and MCP with server admin authorization | REST/OpenAPI and MCP with server admin authorization |
 | Delivery information | Send API result and task outcome | API acceptance plus webhook receipts |
 
 `BotBaseApplication` owns shared registration, conversation and task behavior.
@@ -40,7 +41,7 @@ encrypted filesystem providers are included in the examples.
 
 ## Install
 
-Python **3.11–3.14** is tested. `kajenn>=0.3.0` is installed as a dependency.
+Python **3.11–3.14** is tested. `kajenn>=0.4.1` is installed as a dependency.
 Bot versions and releases are independent from the server.
 
 Install the published package in a virtual environment:

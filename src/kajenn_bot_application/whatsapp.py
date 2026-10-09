@@ -54,6 +54,7 @@ from kajenn.application import ApplicationGrammar
 from kajenn.exceptions import HTTPForbidden, HTTPNotFound, HTTPUnauthorized
 from kajenn.request import Request
 from kajenn.response import Response
+from .administration import _WhatsAppAdministration
 from .bot import BOT_CODE, BotBaseApplication, BotInstanceGrammar
 from .whatsapp_delivery import _Delivery
 from .whatsapp_conversations import _Conversations
@@ -70,6 +71,7 @@ class WhatsAppBotGrammar(ApplicationGrammar):
         self,
         persistence_route: str | BagResolver,
         api_version: str | BagResolver,
+        bot_classes: dict[str, str] | None = None,
         webhook_url: str | BagResolver | None = None,
         app_secret: str | BagResolver | None = None,
         verify_token: str | BagResolver | None = None,
@@ -129,6 +131,9 @@ class WhatsAppBotApplication(BotBaseApplication):
         if not isinstance(value, str) or not value:
             raise ValueError("receivers require verify_token")
         return value
+
+    def _make_administration(self):
+        return _WhatsAppAdministration(self)
 
     def _make_conversations(self):
         return _Conversations(self)
@@ -211,6 +216,9 @@ class WhatsAppBotApplication(BotBaseApplication):
             return bot
 
     async def __call__(self, scope, receive, send):
+        if self._is_administration_path(scope["path"]):
+            await super().__call__(scope, receive, send)
+            return
         if self.webhook_url is None or scope["path"].strip("/"):
             await Response("Not Found", status_code=404)(scope, receive, send)
             return

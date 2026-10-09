@@ -43,6 +43,7 @@ interchangeable.
    guides/telegram
    guides/whatsapp
    guides/persistence
+   guides/administration
    guides/operations
 
 .. toctree::
