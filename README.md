@@ -1,6 +1,6 @@
 # kajenn-bot-application
 
-**Document version:** 0.3 · **Last updated:** 2026-10-08 · **Status:** 🔴 UNDER REVIEW
+**Document version:** 0.4 · **Last updated:** 2026-10-09 · **Status:** 🔴 UNDER REVIEW
 
 [![Tests](https://github.com/kajenn-org/kajenn-bot-application/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/kajenn-org/kajenn-bot-application/actions/workflows/tests.yml)
 [![Documentation](https://readthedocs.org/projects/kajenn-bot-application/badge/?version=latest)](https://kajenn-bot-application.readthedocs.io/en/latest/)
@@ -47,21 +47,24 @@ search, sending, channel/group creation and membership administration through
 REST/MCP. Sessions are encrypted locally; grants default to deny. Login stays
 local and policy management is restricted to an administrator.
 
-See the [personal account guide](docs/guides/telegram-account.md). This feature
-is available on the development branch containing it, not in published 0.1.0.
+See the [personal account guide](docs/guides/telegram-account.md). Personal account
+access and REST/MCP bot administration are included in the **0.2.0b1 beta**.
 
 ## Install
 
 Python **3.11–3.14** is tested. `kajenn>=0.4.1` is installed as a dependency.
 Bot versions and releases are independent from the server.
 
-Install the published package in a virtual environment:
+Install the beta in a virtual environment:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install kajenn-bot-application
+python -m pip install "kajenn-bot-application==0.2.0b1"
 ```
+
+The beta requires an explicit version or pip's `--pre` option; an unqualified
+installation continues to select the stable release.
 
 To run the included examples or contribute, clone the repository and install it:
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kajenn-bot-application"
-version = "0.1.0"
+version = "0.2.0b1"
 description = "Telegram and WhatsApp bot applications for kajenn"
 readme = "README.md"
 requires-python = ">=3.11"

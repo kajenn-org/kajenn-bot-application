@@ -1,12 +1,12 @@
 # Personal Telegram account
 
-**Document version:** 0.1 · **Last updated:** 2026-10-09 · **Status:** 🔴 UNDER REVIEW
+**Document version:** 0.2 · **Last updated:** 2026-10-09 · **Status:** 🔴 UNDER REVIEW
 
 `TelegramAccountApplication` connects one personal Telegram account through
 MTProto. It is a separate application in the same distribution as the Telegram
 and WhatsApp bots. It does not inherit bot registration, webhook processing or
 bot conversations. Multiple accounts require separate mounts, state files and
-keys. This feature is under development; use the source branch containing it.
+keys. This application is included in the `0.2.0b1` beta release.
 
 Use it for a local developer service: an authenticated MCP client can read a
 permitted group's history, send a message, or create and administer a channel
@@ -16,7 +16,10 @@ using a personal session does not override Telegram's sender presentation.
 
 ## Install and enroll locally
 
-Install this repository into a virtual environment with `python -m pip install .`.
+Install the beta with `python -m pip install "kajenn-bot-application==0.2.0b1"`.
+To use the enrollment and configuration examples below, clone the repository,
+switch to tag `v0.2.0b1`, and install it with `python -m pip install .`.
+The examples are included in the source checkout, not the installed wheel.
 The package includes Telethon, cryptography and filelock; kajenn 0.4.1 or newer
 provides authenticated REST/MCP discovery. There is no webhook or polling loop:
 the application maintains an MTProto connection for requested operations.
