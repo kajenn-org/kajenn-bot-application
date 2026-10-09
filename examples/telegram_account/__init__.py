@@ -12,11 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Telegram and WhatsApp bot applications mounted on a kajenn server."""
-
-from .bot import BotBaseApplication
-from .telegram import TelegramBotApplication
-from .telegram_account import TelegramAccountApplication
-from .whatsapp import WhatsAppBotApplication
-
-__all__ = ["BotBaseApplication", "TelegramBotApplication", "TelegramAccountApplication", "WhatsAppBotApplication"]
+"""Personal Telegram account configuration and local enrollment."""

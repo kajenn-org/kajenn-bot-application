@@ -77,3 +77,12 @@ the server's; kajenn does not import or install it.
 
 Start with [getting started](../getting-started.md), then
 [write a bot](writing-bots.md) and select an [application persistence provider](persistence.md).
+
+## Administration
+
+`BotBaseApplication` inherits kajenn's `McpOpenApiApplication`. Each provider mounts
+its own administrative routing class at `/_admin`, shared with the `/_mcp` endpoint.
+These routes call application APIs directly and require the hosting server's
+`admin` role. They do not invoke the registered bot's command router. See
+[administration](administration.md) for authentication, registration catalogs and
+request examples.

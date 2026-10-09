@@ -1,6 +1,6 @@
 # Getting started
 
-**Document version:** 0.2 · **Last updated:** 2026-10-08 · **Status:** 🔴 UNDER REVIEW
+**Document version:** 0.3 · **Last updated:** 2026-10-09 · **Status:** 🔴 UNDER REVIEW
 
 This guide takes a fresh checkout to a working bot. Choose Telegram for a short
 first run, or WhatsApp when you already have a Meta business app and test number.
@@ -11,6 +11,7 @@ Both examples mount a bot application and an encrypted filesystem registry.
 ```bash
 git clone https://github.com/kajenn-org/kajenn-bot-application.git
 cd kajenn-bot-application
+git switch --detach v0.2.0b1
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install .
@@ -18,8 +19,10 @@ python -m pip install .
 
 These are POSIX shell commands. On Windows, use `.venv\Scripts\Activate.ps1`
 and the equivalent environment-variable syntax in PowerShell.
-Installation brings in `kajenn>=0.3.0`; no sibling server checkout is required.
-The examples are part of the source checkout, not the installed wheel.
+Installation brings in `kajenn>=0.4.1`; no sibling server checkout is required.
+The examples are part of the source checkout, not the installed wheel. For an
+existing deployment that supplies its own configuration, install the beta with
+`python -m pip install "kajenn-bot-application==0.2.0b1"`.
 
 ## Prepare durable storage
 

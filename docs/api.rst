@@ -5,7 +5,9 @@ Document version: 0.2 — Last updated: 2026-10-08 — Status: 🔴 UNDER REVIEW
 
 Import concrete applications from ``kajenn_bot_application``. Call management
 and sending APIs from trusted application code after startup. Grammar classes
-are imported from their corresponding provider modules.
+are imported from their corresponding provider modules. The same application
+mount exposes administrative REST and MCP routes; see :doc:`guides/administration`.
+Remote registry reads return non-secret metadata rather than full records.
 
 Configuration and input examples are in :doc:`getting-started`,
 :doc:`guides/telegram` and :doc:`guides/whatsapp`.
@@ -48,3 +50,11 @@ Shared instance grammar
 
 .. autoclass:: kajenn_bot_application.bot.BotInstanceGrammar
    :members:
+
+Personal Telegram account
+-------------------------
+
+See :doc:`guides/telegram-account` for local enrollment, policy and operation contracts.
+
+.. autoclass:: kajenn_bot_application.TelegramAccountApplication
+   :members: start_login, complete_login, get_status, get_policy, set_policy, revoke_session, get_chats, get_messages, send_text, send_document, edit_message, delete_messages, create_channel, create_group, set_chat_details, get_members, invite_members, remove_member, set_member_admin

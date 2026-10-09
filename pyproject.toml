@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kajenn-bot-application"
-version = "0.1.0"
+version = "0.2.0b1"
 description = "Telegram and WhatsApp bot applications for kajenn"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -21,11 +21,14 @@ classifiers = [
     "Framework :: AsyncIO",
 ]
 dependencies = [
-    "kajenn>=0.3.0",
+    "kajenn>=0.4.1",
     "genro-bag>=0.27.0",
     "genro-builders>=0.27.0",
     "genro-routes>=0.30.1",
     "httpx>=0.27",
+    "Telethon>=1.45,<2",
+    "cryptography>=42.0",
+    "filelock>=3.16",
 ]
 
 [project.optional-dependencies]
