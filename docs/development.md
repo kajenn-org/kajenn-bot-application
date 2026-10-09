@@ -40,6 +40,12 @@ Merge reviewed changes into `develop`; prepare releases on `main`. Tag the check
 release as `v<version>`. The publish workflow validates the tag against distribution
 metadata and builds the source and wheel distributions before publishing.
 
+Beta releases use a PEP 440 prerelease version, such as `0.2.0b1`, and a matching
+`v0.2.0b1` tag. Mark the GitHub release as a prerelease. PyPI recognizes the beta
+from the package version; users opt in with an exact version or `pip install
+--pre kajenn-bot-application`. Keep the Beta development-status classifier until
+the package is promoted to a stable maturity level.
+
 Before the first release, configure a PyPI Trusted Publisher for
 `kajenn-org/kajenn-bot-application`, workflow `publish.yml`, environment `release`.
 The repository's release environment can require manual approval.
