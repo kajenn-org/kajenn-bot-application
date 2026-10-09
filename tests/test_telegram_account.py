@@ -488,3 +488,107 @@ async def test_management_is_inaccessible_to_operator_and_denied_calls_never_sen
     response = await http.post("/personal/_account/send_text", json={"chat_id": CHAT, "text": "no"})
     assert response.status_code in (401, 403)
     assert not any(call[0] == "send" for call in app.client.calls)
+
+
+async def test_mcp_history_workflow_keeps_chat_and_cursor_filters(account):
+    _, http, _ = account
+    calls = AccountCalls(http)
+    await calls.policy(
+        {"operations": ["get_chats", "get_messages"], "chats": {str(CHAT): ["read"]}}
+    )
+    dialogs = await calls.mcp("tools/call", {"name": "get_chats", "arguments": {"limit": 1}})
+    items = dialogs["result"]["structuredContent"]["items"]
+    assert [item["id"] for item in items] == [CHAT]
+    arguments = {"chat_id": items[0]["id"], "limit": 2, "since": "2026-10-02T00:00:00Z"}
+    first = await calls.mcp("tools/call", {"name": "get_messages", "arguments": arguments})
+    page = first["result"]["structuredContent"]
+    arguments["before_id"] = page["next_before_id"]
+    second = await calls.mcp("tools/call", {"name": "get_messages", "arguments": arguments})
+    assert [
+        item["id"] for item in page["items"] + second["result"]["structuredContent"]["items"]
+    ] == [5, 4, 3, 2]
+    arguments["chat_id"] = OTHER
+    denied = await calls.mcp("tools/call", {"name": "get_messages", "arguments": arguments})
+    assert denied["error"] == {"code": -32000, "message": "Not authorized"}
+
+
+async def test_mcp_channel_administration_workflow_respects_owner_policy(account):
+    app, http, _ = account
+    calls = AccountCalls(http)
+    policy = {"operations": ["*"], "chats": {"*": ["read", "write", "admin"]}}
+    await calls.policy(policy)
+    saved = await http.post(
+        "/personal/_admin/get_policy", json={}, headers={"Authorization": "Bearer owner"}
+    )
+    assert saved.json() == policy
+    for operation, arguments in [
+        ("create_channel", {"title": "Announcements", "description": "Releases"}),
+        ("create_group", {"title": "Development"}),
+        ("set_chat_details", {"chat_id": CHAT, "description": "New description"}),
+        ("invite_members", {"chat_id": CHAT, "user_ids": [8, 9]}),
+        ("get_members", {"chat_id": CHAT, "limit": 2}),
+        ("set_member_admin", {"chat_id": CHAT, "user_id": 9, "rights": ["pin_messages"]}),
+        ("remove_member", {"chat_id": CHAT, "user_id": 8}),
+    ]:
+        response = await calls.mcp("tools/call", {"name": operation, "arguments": arguments})
+        assert response["result"].get("isError") is not True, response
+        assert response["result"]["structuredContent"]
+    assert any(call[0] == "kick" for call in app.client.calls)
+    await calls.policy({"operations": ["get_members"], "chats": {str(CHAT): ["read"]}})
+    before = len(app.client.calls)
+    denied = await calls.mcp(
+        "tools/call", {"name": "remove_member", "arguments": {"chat_id": CHAT, "user_id": 8}}
+    )
+    assert denied["error"] == {"code": -32000, "message": "Not authorized"}
+    assert len(app.client.calls) == before
+
+
+async def test_mcp_message_mutations_keep_ownership_checks(account):
+    app, http, _ = account
+    calls = AccountCalls(http)
+    await calls.policy(
+        {"operations": ["edit_message", "delete_messages"], "chats": {str(CHAT): ["write"]}}
+    )
+    result = await calls.mcp(
+        "tools/call",
+        {
+            "name": "edit_message",
+            "arguments": {"chat_id": CHAT, "message_id": 4, "text": "Updated"},
+        },
+    )
+    assert result["result"]["structuredContent"]["id"] == 4
+    result = await calls.mcp(
+        "tools/call",
+        {"name": "delete_messages", "arguments": {"chat_id": CHAT, "message_ids": [4]}},
+    )
+    assert result["result"]["structuredContent"]["deleted_ids"] == [4]
+    app.client.messages[0].out = False
+    before = len([call for call in app.client.calls if call[0] == "delete"])
+    denied = await calls.mcp(
+        "tools/call",
+        {"name": "delete_messages", "arguments": {"chat_id": CHAT, "message_ids": [5]}},
+    )
+    assert denied["error"] == {"code": -32000, "message": "Not authorized"}
+    assert len([call for call in app.client.calls if call[0] == "delete"]) == before
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError("provider detail"),
+        ConnectionError("provider detail"),
+        errors.ChatWriteForbiddenError(None),
+    ],
+)
+async def test_failed_mutation_returns_explicit_outcome_without_retries(account, failure):
+    app, http, _ = account
+    await AccountCalls(http).policy({"operations": ["send_text"], "chats": {str(CHAT): ["write"]}})
+    app.client.failure = failure
+    response = await http.post(
+        "/personal/_account/send_text",
+        json={"chat_id": CHAT, "text": "once"},
+        headers={"Authorization": "Bearer operator"},
+    )
+    assert response.status_code == (502 if isinstance(failure, errors.RPCError) else 503)
+    assert "provider detail" not in response.text
+    assert len([call for call in app.client.calls if call[0] == "send"]) == 1
