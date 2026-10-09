@@ -26,14 +26,15 @@ from kajenn.response import Response
 from kajenn_bot_application import TelegramAccountApplication
 
 
-
 class AccountIdentity(RoutedApplication):
     """Example local tokens: operator cannot modify policy or revoke the device."""
 
     @route()
     def check(self, credential: str = "", channel: str = "") -> dict:
-        for name, tags in (("owner", ["admin", "telegram_account"]),
-                           ("operator", ["telegram_account"])):
+        for name, tags in (
+            ("owner", ["admin", "telegram_account"]),
+            ("operator", ["telegram_account"]),
+        ):
             token = self.config(f"parameters.{name}_token", default=None)
             if token and hmac.compare_digest(credential, f"Bearer {token}"):
                 return {"identity": name, "tags": tags, "data": {}}
@@ -60,8 +61,10 @@ class TelegramAccountConfiguration(CONFIGURATION_TEMPLATES["default"]):
             policy={"operations": [], "chats": {}},
         )
         identity = apps.application(code="identity", app_class=AccountIdentity)
-        identity.parameters(owner_token=EnvResolver("KAJENN_TELEGRAM_OWNER_TOKEN"),
-                            operator_token=EnvResolver("KAJENN_TELEGRAM_OPERATOR_TOKEN"))
+        identity.parameters(
+            owner_token=EnvResolver("KAJENN_TELEGRAM_OWNER_TOKEN"),
+            operator_token=EnvResolver("KAJENN_TELEGRAM_OPERATOR_TOKEN"),
+        )
         self.channels_section(cfg)
 
     def channels_section(self, cfg):

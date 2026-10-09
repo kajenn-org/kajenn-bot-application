@@ -34,29 +34,50 @@ class _AccountOperations(RoutingClass):
         return await self.application.get_status()
 
     @route(channel_channels="mcp,rest", auth_rule="telegram_account", openapi_method="post")
-    async def get_chats(self, limit: int=100, offset: int=0) -> dict:
+    async def get_chats(self, limit: int = 100, offset: int = 0) -> dict:
         """List readable dialogs with numeric IDs; names are display/search data only."""
         return await self.application.get_chats(limit=limit, offset=offset)
 
     @route(channel_channels="mcp,rest", auth_rule="telegram_account", openapi_method="post")
-    async def get_messages(self, chat_id: int, limit: int=100, before_id: int=0, since: str | None=None, until: str | None=None, search: str | None=None) -> dict:
+    async def get_messages(
+        self,
+        chat_id: int,
+        limit: int = 100,
+        before_id: int = 0,
+        since: str | None = None,
+        until: str | None = None,
+        search: str | None = None,
+    ) -> dict:
         """Read newest-first pages; preserve filters when following next_before_id."""
-        return await self.application.get_messages(chat_id=chat_id, limit=limit, before_id=before_id, since=since, until=until, search=search)
+        return await self.application.get_messages(
+            chat_id=chat_id,
+            limit=limit,
+            before_id=before_id,
+            since=since,
+            until=until,
+            search=search,
+        )
 
     @route(channel_channels="mcp,rest", auth_rule="telegram_account", openapi_method="post")
-    async def send_text(self, chat_id: int, text: str, reply_to: int | None=None) -> dict:
+    async def send_text(self, chat_id: int, text: str, reply_to: int | None = None) -> dict:
         """Send text."""
         return await self.application.send_text(chat_id=chat_id, text=text, reply_to=reply_to)
 
     @route(channel_channels="mcp,rest", auth_rule="telegram_account", openapi_method="post")
-    async def send_document(self, chat_id: int, filename: str, content_base64: str, caption: str='') -> dict:
+    async def send_document(
+        self, chat_id: int, filename: str, content_base64: str, caption: str = ""
+    ) -> dict:
         """Send document."""
-        return await self.application.send_document(chat_id=chat_id, filename=filename, content_base64=content_base64, caption=caption)
+        return await self.application.send_document(
+            chat_id=chat_id, filename=filename, content_base64=content_base64, caption=caption
+        )
 
     @route(channel_channels="mcp,rest", auth_rule="telegram_account", openapi_method="post")
     async def edit_message(self, chat_id: int, message_id: int, text: str) -> dict:
         """Edit message."""
-        return await self.application.edit_message(chat_id=chat_id, message_id=message_id, text=text)
+        return await self.application.edit_message(
+            chat_id=chat_id, message_id=message_id, text=text
+        )
 
     @route(channel_channels="mcp,rest", auth_rule="telegram_account", openapi_method="post")
     async def delete_messages(self, chat_id: int, message_ids: list[int]) -> dict:
@@ -64,22 +85,26 @@ class _AccountOperations(RoutingClass):
         return await self.application.delete_messages(chat_id=chat_id, message_ids=message_ids)
 
     @route(channel_channels="mcp,rest", auth_rule="telegram_account", openapi_method="post")
-    async def create_channel(self, title: str, description: str='') -> dict:
+    async def create_channel(self, title: str, description: str = "") -> dict:
         """Create channel."""
         return await self.application.create_channel(title=title, description=description)
 
     @route(channel_channels="mcp,rest", auth_rule="telegram_account", openapi_method="post")
-    async def create_group(self, title: str, description: str='') -> dict:
+    async def create_group(self, title: str, description: str = "") -> dict:
         """Create a supergroup; invitations and grants are separate explicit operations."""
         return await self.application.create_group(title=title, description=description)
 
     @route(channel_channels="mcp,rest", auth_rule="telegram_account", openapi_method="post")
-    async def set_chat_details(self, chat_id: int, title: str | None=None, description: str | None=None) -> dict:
+    async def set_chat_details(
+        self, chat_id: int, title: str | None = None, description: str | None = None
+    ) -> dict:
         """Set chat details."""
-        return await self.application.set_chat_details(chat_id=chat_id, title=title, description=description)
+        return await self.application.set_chat_details(
+            chat_id=chat_id, title=title, description=description
+        )
 
     @route(channel_channels="mcp,rest", auth_rule="telegram_account", openapi_method="post")
-    async def get_members(self, chat_id: int, limit: int=100, offset: int=0) -> dict:
+    async def get_members(self, chat_id: int, limit: int = 100, offset: int = 0) -> dict:
         """Get members."""
         return await self.application.get_members(chat_id=chat_id, limit=limit, offset=offset)
 
@@ -96,7 +121,9 @@ class _AccountOperations(RoutingClass):
     @route(channel_channels="mcp,rest", auth_rule="telegram_account", openapi_method="post")
     async def set_member_admin(self, chat_id: int, user_id: int, rights: list[str]) -> dict:
         """Set member admin."""
-        return await self.application.set_member_admin(chat_id=chat_id, user_id=user_id, rights=rights)
+        return await self.application.set_member_admin(
+            chat_id=chat_id, user_id=user_id, rights=rights
+        )
 
 
 class _AccountAdministration(RoutingClass):

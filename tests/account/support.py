@@ -35,9 +35,15 @@ class FakeTelegram:
         self.settings = kwargs
 
     def message(self, code, chat_id=CHAT, out=True):
-        return SimpleNamespace(id=code, chat_id=chat_id, out=out,
-                               sender_id=7, date=datetime(2026, 10, code, tzinfo=timezone.utc),
-                               raw_text=f"Message {code}", media=None)
+        return SimpleNamespace(
+            id=code,
+            chat_id=chat_id,
+            out=out,
+            sender_id=7,
+            date=datetime(2026, 10, code, tzinfo=timezone.utc),
+            raw_text=f"Message {code}",
+            media=None,
+        )
 
     async def connect(self):
         self.connected = True
@@ -90,16 +96,25 @@ class FakeTelegram:
 
     async def iter_dialogs(self, **kwargs):
         for code, name in ((CHAT, "Development"), (OTHER, "Private")):
-            yield SimpleNamespace(id=code, name=name, is_group=True, is_channel=True, is_user=False,
-                                  input_entity=getattr(self, "dialog_entity", None))
+            yield SimpleNamespace(
+                id=code,
+                name=name,
+                is_group=True,
+                is_channel=True,
+                is_user=False,
+                input_entity=getattr(self, "dialog_entity", None),
+            )
 
     async def iter_messages(self, entity, **kwargs):
         self.calls.append(("history", entity, kwargs))
-        items = [m for m in self.messages
-                 if (not kwargs.get("offset_id") or m.id < kwargs["offset_id"])
-                 and (not kwargs.get("offset_date") or m.date < kwargs["offset_date"])
-                 and (not kwargs.get("search") or kwargs["search"] in m.raw_text)]
-        for message in items[:kwargs["limit"]]:
+        items = [
+            m
+            for m in self.messages
+            if (not kwargs.get("offset_id") or m.id < kwargs["offset_id"])
+            and (not kwargs.get("offset_date") or m.date < kwargs["offset_date"])
+            and (not kwargs.get("search") or kwargs["search"] in m.raw_text)
+        ]
+        for message in items[: kwargs["limit"]]:
             yield message
 
     async def get_messages(self, entity, ids):
@@ -125,8 +140,13 @@ class FakeTelegram:
 
     async def iter_participants(self, entity, **kwargs):
         for code in range(1, 4):
-            yield SimpleNamespace(id=code, first_name=f"Person {code}", last_name=None,
-                                  username=f"person{code}", bot=False)
+            yield SimpleNamespace(
+                id=code,
+                first_name=f"Person {code}",
+                last_name=None,
+                username=f"person{code}",
+                bot=False,
+            )
 
     async def kick_participant(self, entity, user):
         self.calls.append(("kick", entity, user))
@@ -136,6 +156,15 @@ class FakeTelegram:
 
     async def __call__(self, request):
         self.calls.append(("request", request))
-        return SimpleNamespace(chats=[types.Channel(id=300, title="New", photo=types.ChatPhotoEmpty(),
-                                                    date=datetime.now(timezone.utc),
-                                                    broadcast=True, access_hash=1234)])
+        return SimpleNamespace(
+            chats=[
+                types.Channel(
+                    id=300,
+                    title="New",
+                    photo=types.ChatPhotoEmpty(),
+                    date=datetime.now(timezone.utc),
+                    broadcast=True,
+                    access_hash=1234,
+                )
+            ]
+        )

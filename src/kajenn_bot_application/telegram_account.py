@@ -53,21 +53,44 @@ from .account_routes import _AccountOperations, _AccountAdministration
 
 # Chat grant required by each operation; None marks an account-wide operation.
 ACCOUNT_OPERATIONS = {
-    "get_chats": "read", "get_messages": "read", "get_members": "read",
-    "send_text": "write", "send_document": "write", "edit_message": "write",
-    "delete_messages": "write", "create_channel": None, "create_group": None,
-    "set_chat_details": "admin", "invite_members": "admin", "remove_member": "admin",
+    "get_chats": "read",
+    "get_messages": "read",
+    "get_members": "read",
+    "send_text": "write",
+    "send_document": "write",
+    "edit_message": "write",
+    "delete_messages": "write",
+    "create_channel": None,
+    "create_group": None,
+    "set_chat_details": "admin",
+    "invite_members": "admin",
+    "remove_member": "admin",
     "set_member_admin": "admin",
 }
-ADMIN_RIGHTS = {"change_info", "post_messages", "edit_messages", "delete_messages",
-                "ban_users", "invite_users", "pin_messages", "add_admins", "manage_call"}
+ADMIN_RIGHTS = {
+    "change_info",
+    "post_messages",
+    "edit_messages",
+    "delete_messages",
+    "ban_users",
+    "invite_users",
+    "pin_messages",
+    "add_admins",
+    "manage_call",
+}
 DOCUMENT_LIMIT = 5 * 1024 * 1024
 
 
 class _AccountGrammar(ApplicationGrammar):
     @element(sub_tags="", node_label="telegram_account")
-    def telegram_account(self, api_id: int | BagResolver, api_hash: str | BagResolver,
-                         session_path: str | BagResolver, encryption_key: str | BagResolver, policy: dict | None = None) -> None:
+    def telegram_account(
+        self,
+        api_id: int | BagResolver,
+        api_hash: str | BagResolver,
+        session_path: str | BagResolver,
+        encryption_key: str | BagResolver,
+        policy: dict | None = None,
+    ) -> None:
         """Local account credentials, encrypted state and initial operation/chat grants."""
 
 
@@ -76,10 +99,24 @@ class TelegramAccountApplication(McpOpenApiApplication):
 
     grammar = _AccountGrammar
 
-    def __init__(self, *, api_id=None, api_hash=None, session_path=None, encryption_key=None,
-                 policy=None, client_factory=TelegramClient, **kwargs):
-        self._settings = dict(api_id=api_id, api_hash=api_hash, session_path=session_path,
-                              encryption_key=encryption_key, policy=policy)
+    def __init__(
+        self,
+        *,
+        api_id=None,
+        api_hash=None,
+        session_path=None,
+        encryption_key=None,
+        policy=None,
+        client_factory=TelegramClient,
+        **kwargs,
+    ):
+        self._settings = dict(
+            api_id=api_id,
+            api_hash=api_hash,
+            session_path=session_path,
+            encryption_key=encryption_key,
+            policy=policy,
+        )
         self._factory = client_factory
         self._client = None
         self._store = None
@@ -130,8 +167,9 @@ class TelegramAccountApplication(McpOpenApiApplication):
     async def __call__(self, scope, receive, send):
         segment = scope["path"].strip("/").partition("/")[0]
         if segment in (self.api_name, "_admin") and scope.get("method") != "POST":
-            await Response("Method Not Allowed", status_code=405,
-                           headers={"Allow": "POST"})(scope, receive, send)
+            await Response("Method Not Allowed", status_code=405, headers={"Allow": "POST"})(
+                scope, receive, send
+            )
             return
         await super().__call__(scope, receive, send)
 
@@ -140,7 +178,12 @@ class TelegramAccountApplication(McpOpenApiApplication):
             if self._client is not None:
                 return
             api_id, api_hash = self._setting("api_id"), self._setting("api_hash")
-            if not isinstance(api_id, int) or isinstance(api_id, bool) or api_id <= 0 or not api_hash:
+            if (
+                not isinstance(api_id, int)
+                or isinstance(api_id, bool)
+                or api_id <= 0
+                or not api_hash
+            ):
                 raise ValueError("telegram_account requires api_id and api_hash")
             key = self._setting("encryption_key")
             if not key:
@@ -148,8 +191,11 @@ class TelegramAccountApplication(McpOpenApiApplication):
             self._store = _AccountStore(self.session_path, key)
             saved = self.store.open()
             try:
-                self._policy = self._validate_policy(saved["policy"] if saved else
-                    (self._setting("policy") or {"operations": [], "chats": {}}))
+                self._policy = self._validate_policy(
+                    saved["policy"]
+                    if saved
+                    else (self._setting("policy") or {"operations": [], "chats": {}})
+                )
                 self._client = self._new_client(saved["session"] if saved else "")
                 await self.client.connect()
                 self._authorized = await self.client.is_user_authorized()
@@ -157,7 +203,9 @@ class TelegramAccountApplication(McpOpenApiApplication):
                 if self._authorized:
                     me = await self.client.get_me()
                     if me is None or me.bot or (saved and saved.get("account_id") != me.id):
-                        raise ValueError("session does not belong to the configured personal account")
+                        raise ValueError(
+                            "session does not belong to the configured personal account"
+                        )
                     self._account = self._person(me)
                 self._save()
             except BaseException:
@@ -185,15 +233,26 @@ class TelegramAccountApplication(McpOpenApiApplication):
                         self._clear_login()
 
     def _new_client(self, session=""):
-        return self._factory(StringSession(session), self._setting("api_id"), self._setting("api_hash"),
-            device_model="kajenn Telegram account", receive_updates=False,
-            flood_sleep_threshold=0, request_retries=0, connection_retries=2,
-            raise_last_call_error=True)
+        return self._factory(
+            StringSession(session),
+            self._setting("api_id"),
+            self._setting("api_hash"),
+            device_model="kajenn Telegram account",
+            receive_updates=False,
+            flood_sleep_threshold=0,
+            request_retries=0,
+            connection_retries=2,
+            raise_last_call_error=True,
+        )
 
     def _save(self, policy=None):
-        self.store.save({"session": self.client.session.save() if self._authorized else "",
-                         "account_id": self._account["id"] if self._account else None,
-                         "policy": policy if policy is not None else self.policy})
+        self.store.save(
+            {
+                "session": self.client.session.save() if self._authorized else "",
+                "account_id": self._account["id"] if self._account else None,
+                "policy": policy if policy is not None else self.policy,
+            }
+        )
 
     def _clear_login(self):
         self._phone = self._phone_code_hash = None
@@ -224,8 +283,9 @@ class TelegramAccountApplication(McpOpenApiApplication):
                 if password is not None:
                     me = await self.client.sign_in(password=password)
                 else:
-                    me = await self.client.sign_in(phone=self._phone, code=code,
-                                                   phone_code_hash=self._phone_code_hash)
+                    me = await self.client.sign_in(
+                        phone=self._phone, code=code, phone_code_hash=self._phone_code_hash
+                    )
             except errors.SessionPasswordNeededError:
                 self._password_pending = True
                 return {"state": "password_required"}
@@ -248,8 +308,11 @@ class TelegramAccountApplication(McpOpenApiApplication):
 
     async def get_status(self) -> dict:
         async with self.lock:
-            return {"connected": self.client.is_connected(), "authorized": self._authorized,
-                    "account": copy.deepcopy(self._account)}
+            return {
+                "connected": self.client.is_connected(),
+                "authorized": self._authorized,
+                "account": copy.deepcopy(self._account),
+            }
 
     async def get_policy(self) -> dict:
         return self.policy
@@ -258,16 +321,21 @@ class TelegramAccountApplication(McpOpenApiApplication):
         if not isinstance(policy, dict) or set(policy) != {"operations", "chats"}:
             raise HTTPBadRequest("policy requires operations and chats")
         operations, chats = policy["operations"], policy["chats"]
-        if not isinstance(operations, list) or any(not isinstance(op, str) or
-                op not in {*ACCOUNT_OPERATIONS, "*"} for op in operations):
+        if not isinstance(operations, list) or any(
+            not isinstance(op, str) or op not in {*ACCOUNT_OPERATIONS, "*"} for op in operations
+        ):
             raise HTTPBadRequest("unknown account operation")
         if not isinstance(chats, dict):
             raise HTTPBadRequest("chats must map numeric chat IDs or * to grants")
         for chat, grants in chats.items():
-            if not isinstance(chat, str) or (chat != "*" and
-                    (not chat.lstrip("-").isdigit() or str(int(chat)) != chat or int(chat) == 0)):
+            if not isinstance(chat, str) or (
+                chat != "*"
+                and (not chat.lstrip("-").isdigit() or str(int(chat)) != chat or int(chat) == 0)
+            ):
                 raise HTTPBadRequest("chat keys must be canonical numeric IDs or *")
-            if not isinstance(grants, list) or any(grant not in ("read", "write", "admin") for grant in grants):
+            if not isinstance(grants, list) or any(
+                grant not in ("read", "write", "admin") for grant in grants
+            ):
                 raise HTTPBadRequest("chat grants must be read, write or admin")
         return copy.deepcopy(policy)
 
@@ -289,7 +357,9 @@ class TelegramAccountApplication(McpOpenApiApplication):
                 except errors.UnauthorizedError:
                     pass
                 except errors.RPCError as exc:
-                    raise HTTPException(502, f"Telegram logout failed: {type(exc).__name__}") from None
+                    raise HTTPException(
+                        502, f"Telegram logout failed: {type(exc).__name__}"
+                    ) from None
             self._authorized = False
             self._account = None
             self._clear_login()
@@ -322,17 +392,26 @@ class TelegramAccountApplication(McpOpenApiApplication):
                 self._save()
                 return result
             except errors.FloodWaitError as exc:
-                raise HTTPException(429, f"Telegram rate limit; retry after {exc.seconds} seconds",
-                                    headers=[(b"retry-after", str(exc.seconds).encode())]) from None
+                raise HTTPException(
+                    429,
+                    f"Telegram rate limit; retry after {exc.seconds} seconds",
+                    headers=[(b"retry-after", str(exc.seconds).encode())],
+                ) from None
             except errors.UnauthorizedError:
                 self._authorized = False
                 self._account = None
                 self._save()
-                raise HTTPException(409, "Telegram session was revoked; local login is required") from None
+                raise HTTPException(
+                    409, "Telegram session was revoked; local login is required"
+                ) from None
             except errors.RPCError as exc:
-                raise HTTPException(502, f"Telegram rejected the operation: {type(exc).__name__}") from None
+                raise HTTPException(
+                    502, f"Telegram rejected the operation: {type(exc).__name__}"
+                ) from None
             except (TimeoutError, ConnectionError, OSError):
-                raise HTTPException(503, "Telegram operation outcome is uncertain; inspect before retrying") from None
+                raise HTTPException(
+                    503, "Telegram operation outcome is uncertain; inspect before retrying"
+                ) from None
 
     def _limit(self, value, maximum=100):
         if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= maximum:
@@ -351,14 +430,23 @@ class TelegramAccountApplication(McpOpenApiApplication):
             raise HTTPBadRequest("dates require ISO 8601 with a timezone") from None
 
     def _person(self, person):
-        return {"id": person.id, "username": person.username,
-                "name": " ".join(filter(None, [person.first_name, getattr(person, "last_name", None)])),
-                "bot": bool(person.bot)}
+        return {
+            "id": person.id,
+            "username": person.username,
+            "name": " ".join(filter(None, [person.first_name, getattr(person, "last_name", None)])),
+            "bot": bool(person.bot),
+        }
 
     def _message(self, message):
-        return {"id": message.id, "chat_id": message.chat_id, "sender_id": message.sender_id,
-                "date": message.date.isoformat(), "text": message.raw_text,
-                "outgoing": bool(message.out), "has_media": message.media is not None}
+        return {
+            "id": message.id,
+            "chat_id": message.chat_id,
+            "sender_id": message.sender_id,
+            "date": message.date.isoformat(),
+            "text": message.raw_text,
+            "outgoing": bool(message.out),
+            "has_media": message.media is not None,
+        }
 
     async def get_chats(self, limit: int = 100, offset: int = 0) -> dict:
         """List readable dialogs with numeric IDs; names are display/search data only."""
@@ -379,13 +467,28 @@ class TelegramAccountApplication(McpOpenApiApplication):
                 more = True
                 break
             if self._allowed_chat(dialog.id, "read"):
-                items.append({"id": dialog.id, "name": dialog.name,
-                              "kind": "user" if dialog.is_user else "group" if dialog.is_group else "channel"})
+                items.append(
+                    {
+                        "id": dialog.id,
+                        "name": dialog.name,
+                        "kind": "user"
+                        if dialog.is_user
+                        else "group"
+                        if dialog.is_group
+                        else "channel",
+                    }
+                )
         return {"items": items, "next_offset": offset + limit if more else None}
 
-    async def get_messages(self, chat_id: int, limit: int = 100, before_id: int = 0,
-                           since: str | None = None, until: str | None = None,
-                           search: str | None = None) -> dict:
+    async def get_messages(
+        self,
+        chat_id: int,
+        limit: int = 100,
+        before_id: int = 0,
+        since: str | None = None,
+        until: str | None = None,
+        search: str | None = None,
+    ) -> dict:
         """Read newest-first pages; preserve filters when following next_before_id."""
         self._limit(limit)
         if before_id < 0:
@@ -393,8 +496,17 @@ class TelegramAccountApplication(McpOpenApiApplication):
         start, end = self._date(since), self._date(until)
         if start and end and start >= end:
             raise HTTPBadRequest("since must precede until")
-        return await self._run("get_messages", chat_id, self._get_messages,
-                               chat_id, limit, before_id, start, end, search)
+        return await self._run(
+            "get_messages",
+            chat_id,
+            self._get_messages,
+            chat_id,
+            limit,
+            before_id,
+            start,
+            end,
+            search,
+        )
 
     async def _entity(self, peer_id):
         """Resolve stable IDs after restart; StringSession does not persist entity hashes."""
@@ -409,8 +521,9 @@ class TelegramAccountApplication(McpOpenApiApplication):
     async def _get_messages(self, chat_id, limit, before_id, start, end, search):
         entity = await self._entity(chat_id)
         items = []
-        async for message in self.client.iter_messages(entity, limit=limit + 1,
-                offset_id=before_id, offset_date=end, search=search):
+        async for message in self.client.iter_messages(
+            entity, limit=limit + 1, offset_id=before_id, offset_date=end, search=search
+        ):
             if start and message.date < start:
                 break
             if end and message.date >= end:
@@ -430,12 +543,20 @@ class TelegramAccountApplication(McpOpenApiApplication):
 
     async def _send_text(self, chat_id, text, reply_to):
         entity = await self._entity(chat_id)
-        return self._message(await self.client.send_message(entity, text, reply_to=reply_to,
-                                                            parse_mode=None, link_preview=False))
+        return self._message(
+            await self.client.send_message(
+                entity, text, reply_to=reply_to, parse_mode=None, link_preview=False
+            )
+        )
 
-    async def send_document(self, chat_id: int, filename: str, content_base64: str,
-                            caption: str = "") -> dict:
-        if not filename or filename in (".", "..") or any(c in filename for c in ("/", "\\", "\x00")):
+    async def send_document(
+        self, chat_id: int, filename: str, content_base64: str, caption: str = ""
+    ) -> dict:
+        if (
+            not filename
+            or filename in (".", "..")
+            or any(c in filename for c in ("/", "\\", "\x00"))
+        ):
             raise HTTPBadRequest("filename must be a simple file name")
         if len(content_base64) > 4 * ((DOCUMENT_LIMIT + 2) // 3):
             raise HTTPBadRequest("document exceeds 5 MiB")
@@ -447,36 +568,47 @@ class TelegramAccountApplication(McpOpenApiApplication):
             raise HTTPBadRequest("document must contain 1 byte to 5 MiB")
         if caption:
             self._text(caption, 1024)
-        return await self._run("send_document", chat_id, self._send_document,
-                               chat_id, filename, content, caption)
+        return await self._run(
+            "send_document", chat_id, self._send_document, chat_id, filename, content, caption
+        )
 
     async def _send_document(self, chat_id, filename, content, caption):
         entity = await self._entity(chat_id)
         stream = io.BytesIO(content)
         stream.name = filename
-        return self._message(await self.client.send_file(entity, stream, caption=caption,
-                                                         force_document=True, parse_mode=None))
+        return self._message(
+            await self.client.send_file(
+                entity, stream, caption=caption, force_document=True, parse_mode=None
+            )
+        )
 
     async def _own_messages(self, entity, chat_id, ids):
         self._limit(len(ids))
         if any(not isinstance(code, int) or isinstance(code, bool) or code <= 0 for code in ids):
             raise HTTPBadRequest("message IDs must be positive integers")
         messages = await self.client.get_messages(entity, ids=ids)
-        if len(messages) != len(ids) or any(message is None or message.chat_id != chat_id
-                                           or not message.out for message in messages):
+        if len(messages) != len(ids) or any(
+            message is None or message.chat_id != chat_id or not message.out for message in messages
+        ):
             raise HTTPForbidden("only your own messages in the selected chat may be changed")
 
     async def edit_message(self, chat_id: int, message_id: int, text: str) -> dict:
         self._text(text)
-        return await self._run("edit_message", chat_id, self._edit_message, chat_id, message_id, text)
+        return await self._run(
+            "edit_message", chat_id, self._edit_message, chat_id, message_id, text
+        )
 
     async def _edit_message(self, chat_id, message_id, text):
         entity = await self._entity(chat_id)
         await self._own_messages(entity, chat_id, [message_id])
-        return self._message(await self.client.edit_message(entity, message_id, text, parse_mode=None))
+        return self._message(
+            await self.client.edit_message(entity, message_id, text, parse_mode=None)
+        )
 
     async def delete_messages(self, chat_id: int, message_ids: list[int]) -> dict:
-        return await self._run("delete_messages", chat_id, self._delete_messages, chat_id, message_ids)
+        return await self._run(
+            "delete_messages", chat_id, self._delete_messages, chat_id, message_ids
+        )
 
     async def _delete_messages(self, chat_id, ids):
         entity = await self._entity(chat_id)
@@ -494,27 +626,37 @@ class TelegramAccountApplication(McpOpenApiApplication):
         return await self._run("create_group", None, self._create_chat, title, description, True)
 
     async def _create_chat(self, title, description, group):
-        result = await self.client(functions.channels.CreateChannelRequest(
-            title=title, about=description, broadcast=not group, megagroup=group))
+        result = await self.client(
+            functions.channels.CreateChannelRequest(
+                title=title, about=description, broadcast=not group, megagroup=group
+            )
+        )
         chat = result.chats[0]
-        return {"id": utils.get_peer_id(chat), "title": chat.title,
-                "kind": "group" if group else "channel"}
+        return {
+            "id": utils.get_peer_id(chat),
+            "title": chat.title,
+            "kind": "group" if group else "channel",
+        }
 
-    async def set_chat_details(self, chat_id: int, title: str | None = None,
-                               description: str | None = None) -> dict:
+    async def set_chat_details(
+        self, chat_id: int, title: str | None = None, description: str | None = None
+    ) -> dict:
         if (title is None) == (description is None):
             raise HTTPBadRequest("set exactly one of title or description per call")
         if title is not None:
             self._text(title, 128)
-        return await self._run("set_chat_details", chat_id, self._set_chat_details,
-                               chat_id, title, description)
+        return await self._run(
+            "set_chat_details", chat_id, self._set_chat_details, chat_id, title, description
+        )
 
     async def _set_chat_details(self, chat_id, title, description):
         entity = await self._entity(chat_id)
         if title is not None:
-            request = (functions.channels.EditTitleRequest(entity, title)
-                       if isinstance(entity, types.InputPeerChannel)
-                       else functions.messages.EditChatTitleRequest(-chat_id, title))
+            request = (
+                functions.channels.EditTitleRequest(entity, title)
+                if isinstance(entity, types.InputPeerChannel)
+                else functions.messages.EditChatTitleRequest(-chat_id, title)
+            )
         else:
             request = functions.messages.EditChatAboutRequest(entity, description)
         await self.client(request)
@@ -534,7 +676,10 @@ class TelegramAccountApplication(McpOpenApiApplication):
             count += 1
             if count > offset:
                 items.append(self._person(person))
-        return {"items": items[:limit], "next_offset": offset + limit if len(items) > limit else None}
+        return {
+            "items": items[:limit],
+            "next_offset": offset + limit if len(items) > limit else None,
+        }
 
     async def invite_members(self, chat_id: int, user_ids: list[int]) -> dict:
         self._limit(len(user_ids), 20)
@@ -569,13 +714,20 @@ class TelegramAccountApplication(McpOpenApiApplication):
         self._user_id(user_id)
         if any(right not in ADMIN_RIGHTS for right in rights):
             raise HTTPBadRequest("unknown administrator right")
-        return await self._run("set_member_admin", chat_id, self._set_member_admin, chat_id, user_id, rights)
+        return await self._run(
+            "set_member_admin", chat_id, self._set_member_admin, chat_id, user_id, rights
+        )
 
     async def _set_member_admin(self, chat_id, user_id, rights):
         entity = await self._entity(chat_id)
         if not isinstance(entity, types.InputPeerChannel):
             raise HTTPBadRequest("administrator rights support channels and supergroups")
         user = await self._entity(user_id)
-        await self.client.edit_admin(entity, user, **{right: right in rights for right in ADMIN_RIGHTS},
-                                     anonymous=False, is_admin=bool(rights))
+        await self.client.edit_admin(
+            entity,
+            user,
+            **{right: right in rights for right in ADMIN_RIGHTS},
+            anonymous=False,
+            is_admin=bool(rights),
+        )
         return {"chat_id": chat_id, "user_id": user_id, "rights": rights}

@@ -23,7 +23,8 @@ from kajenn_bot_application import TelegramAccountApplication
 
 async def main():
     app = TelegramAccountApplication(
-        code="personal", api_id=int(os.environ["KAJENN_TELEGRAM_API_ID"]),
+        code="personal",
+        api_id=int(os.environ["KAJENN_TELEGRAM_API_ID"]),
         api_hash=os.environ["KAJENN_TELEGRAM_API_HASH"],
         session_path=os.environ["KAJENN_TELEGRAM_ACCOUNT_SESSION"],
         encryption_key=os.environ["KAJENN_TELEGRAM_ACCOUNT_KEY"],
@@ -38,7 +39,9 @@ async def main():
         await app.start_login(getpass.getpass("Telegram phone number: "))
         result = await app.complete_login(code=getpass.getpass("Telegram login code: "))
         if result["state"] == "password_required":
-            result = await app.complete_login(password=getpass.getpass("Telegram two-step password: "))
+            result = await app.complete_login(
+                password=getpass.getpass("Telegram two-step password: ")
+            )
         print("Telegram account connected. Configure permissions before using the tools.")
     finally:
         await app.on_shutdown()
