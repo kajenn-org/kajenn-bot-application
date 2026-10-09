@@ -16,7 +16,7 @@
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from telethon import errors, types, utils
+from telethon import errors, functions, types, utils
 from telethon.crypto import AuthKey
 
 CHAT = -1000000000100
@@ -25,6 +25,7 @@ OTHER = -1000000000200
 
 class FakeTelegram:
     def __init__(self, session, api_id, api_hash, **kwargs):
+        assert api_id == 123 and api_hash == "private-api-hash"
         self.session = session
         self.connected = False
         self.authorized = bool(session.auth_key)
@@ -55,7 +56,11 @@ class FakeTelegram:
         return self.connected
 
     async def is_user_authorized(self):
-        return self.authorized
+        try:
+            await self(functions.updates.GetStateRequest())
+        except errors.RPCError:
+            return False
+        return True
 
     async def get_me(self):
         return self.me
@@ -156,6 +161,10 @@ class FakeTelegram:
 
     async def __call__(self, request):
         self.calls.append(("request", request))
+        if isinstance(request, functions.updates.GetStateRequest):
+            if not self.authorized:
+                raise errors.UnauthorizedError(request, "not logged in")
+            return None
         return SimpleNamespace(
             chats=[
                 types.Channel(

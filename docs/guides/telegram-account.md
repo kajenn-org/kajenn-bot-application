@@ -87,6 +87,9 @@ as the example configuration does. Its arguments match those above. `policy`
 is the initial policy for a new state file; persisted administrator changes
 survive restart and take precedence. Invalid credentials, malformed policy or
 undecryptable storage refuse startup without replacing an existing state file.
+Telegram flood waits, server errors and connection failures during startup also
+leave the encrypted session and account binding untouched. Only an explicit
+unauthorized response invalidates the stored authorization.
 
 ## Authentication and administration
 
@@ -112,7 +115,8 @@ excluded from the MCP tool tree. Schema discovery uses kajenn's caller filters;
 an operator's schema does not include administrator routes. Operational tool
 names describe available operations; the account policy is checked when invoked.
 `get_status` returns connection state and the last verified account identity
-and does not require an operation grant. External revocation is detected by
+and does not require an operation grant. It returns immediately even while a
+Telegram operation is waiting. External revocation is detected by
 subsequent Telegram requests or startup, not by a background polling task. `get_policy` returns the rules, never credentials.
 
 The application checks operation/chat grants inside its Python methods, so
@@ -166,7 +170,11 @@ curl --fail-with-body http://127.0.0.1:8000/personal/_admin/set_policy \
 `policy.json` contains `{"policy": {...}}`, with the complete replacement policy.
 For `/get_policy` and `/revoke_session`, send `{}`. A policy change is saved before
 it becomes active. It is serialized with ongoing operations and cannot undo an
-operation already sent to Telegram.
+operation already sent to Telegram. Provider operations run one at a time, with
+a 45-second timeout per operation; this keeps policy changes, logout and message
+mutations ordered. Status and policy reads do not join that queue. The encrypted
+file is written and synchronized only when the session, identity or policy
+changes, not after every history read.
 
 **Confirmations belong to the calling client.** Configure the MCP client to ask
 before sends, deletions, invitations and role changes. The application enforces
@@ -233,6 +241,18 @@ are bounded at 10000. Dialog offsets count scanned dialogs, including excluded
 ones, so an empty page can still have a continuation. Telegram's changing dialog
 and membership order is not a frozen snapshot. Message history uses message IDs
 for continuation instead of mutable positional offsets.
+
+After restart, Telegram peer hashes may need to be loaded again. An uncached ID
+triggers a scan of at most 100 recent dialogs. If the ID is not found within that
+budget, the call stops with HTTP 409 before dispatching the requested operation.
+Use `get_chats` and its `next_offset` pages to populate the client's peer cache
+until the desired chat appears, then retry. The account policy must allow
+`get_chats` and reading that chat. An exhausted lookup below the budget returns
+HTTP 400 for an unknown peer.
+
+Chat descriptions accept an empty string (to clear the description) or at most
+255 characters. Malformed descriptions, offsets, message cursors, document
+fields, user IDs and administrator-right lists are rejected with HTTP 400.
 
 ## Failure and retry behavior
 

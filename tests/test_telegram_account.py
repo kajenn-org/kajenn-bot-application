@@ -14,8 +14,10 @@
 
 """Contract: account permissions apply to Python, REST and MCP without exposing login."""
 
+import asyncio
 import base64
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from filelock import Timeout
@@ -312,8 +314,8 @@ async def test_failed_policy_save_does_not_grant_authority(account):
 
 
 async def test_single_process_lease_and_wrong_key_refuse_session_access(account):
-    app, _, _ = account
-    second = _AccountStore(app.session_path, app._setting("encryption_key"))
+    app, _, key = account
+    second = _AccountStore(app.session_path, key)
     with pytest.raises(Timeout):
         second.open()
 
@@ -381,7 +383,6 @@ async def test_example_grammar_resolves_credentials_and_authentication_routes(
         monkeypatch.setenv(key, value)
     server = AsgiServer(config=TelegramAccountConfiguration, storage=site_mounts(tmp_path))
     app = server.applications["personal"]
-    assert app._setting("api_id") == 123
     with patch.object(app, "_factory", FakeTelegram):
         await app.on_startup()
         async with httpx.AsyncClient(
@@ -592,3 +593,221 @@ async def test_failed_mutation_returns_explicit_outcome_without_retries(account,
     assert response.status_code == (502 if isinstance(failure, errors.RPCError) else 503)
     assert "provider detail" not in response.text
     assert len([call for call in app.client.calls if call[0] == "send"]) == 1
+
+
+@pytest.mark.parametrize("stage", ["authorization", "identity"])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        errors.FloodWaitError(None, capture=30),
+        errors.ServerError(None, "temporary server failure"),
+        ConnectionError("offline"),
+    ],
+)
+async def test_transient_startup_failure_preserves_session_and_identity(account, stage, failure):
+    app, _, key = account
+    await app.on_shutdown()
+    original = app.session_path.read_bytes()
+    saved = json.loads(Fernet(key.encode()).decrypt(original))
+    assert saved["session"] and saved["account_id"] == 7
+    method = "__call__" if stage == "authorization" else "get_me"
+    with patch.object(FakeTelegram, method, new=AsyncMock(side_effect=failure)):
+        with pytest.raises(type(failure)):
+            await app.on_startup()
+        await app.on_shutdown()
+    assert app.session_path.read_bytes() == original
+    # Failed startup releases its lease and a later startup needs no new login.
+    await app.on_startup()
+    assert (await app.get_status())["account"]["id"] == 7
+    assert not any(call[0] == "login" for call in app.client.calls)
+
+
+async def test_revoked_session_at_startup_clears_authorization(account):
+    app, _, key = account
+    await app.on_shutdown()
+    with patch.object(
+        FakeTelegram,
+        "__call__",
+        new=AsyncMock(side_effect=errors.UnauthorizedError(None, "revoked")),
+    ):
+        await app.on_startup()
+    assert not (await app.get_status())["authorized"]
+    saved = json.loads(Fernet(key.encode()).decrypt(app.session_path.read_bytes()))
+    assert saved["session"] == "" and saved["account_id"] is None
+
+
+@pytest.mark.parametrize(
+    "operation, arguments",
+    [
+        ("get_members", {"chat_id": CHAT, "offset": "1"}),
+        ("get_members", {"chat_id": CHAT, "offset": True}),
+        ("get_chats", {"offset": True}),
+        ("get_messages", {"chat_id": CHAT, "before_id": "1"}),
+        ("get_messages", {"chat_id": CHAT, "before_id": True}),
+        ("send_document", {"chat_id": CHAT, "filename": "a.txt", "content_base64": 12}),
+        ("send_document", {"chat_id": CHAT, "filename": 12, "content_base64": "YQ=="}),
+        (
+            "send_document",
+            {"chat_id": CHAT, "filename": "a.txt", "content_base64": "YQ==", "caption": []},
+        ),
+        ("set_member_admin", {"chat_id": CHAT, "user_id": 9, "rights": [[]]}),
+        ("set_member_admin", {"chat_id": CHAT, "user_id": 9, "rights": None}),
+        ("invite_members", {"chat_id": CHAT, "user_ids": [True]}),
+        ("invite_members", {"chat_id": CHAT, "user_ids": None}),
+        ("delete_messages", {"chat_id": CHAT, "message_ids": None}),
+        ("create_channel", {"title": "Channel", "description": "x" * 256}),
+        ("create_group", {"title": "Group", "description": "x" * 256}),
+        ("set_chat_details", {"chat_id": CHAT, "description": "x" * 256}),
+        ("create_channel", {"title": "Channel", "description": 12}),
+        ("create_group", {"title": "Group", "description": None}),
+        ("set_chat_details", {"chat_id": CHAT, "description": []}),
+    ],
+)
+async def test_malformed_arguments_return_400_without_provider_calls(account, operation, arguments):
+    app, http, _ = account
+    await app.set_policy({"operations": ["*"], "chats": {"*": ["read", "write", "admin"]}})
+    before = list(app.client.calls)
+    with pytest.raises(HTTPBadRequest):
+        await getattr(app, operation)(**arguments)
+    response = await http.post(
+        f"/personal/_account/{operation}",
+        json=arguments,
+        headers={"Authorization": "Bearer operator"},
+    )
+    assert response.status_code == 400
+    assert app.client.calls == before
+
+
+@pytest.mark.parametrize("description", ["", "x" * 255])
+async def test_description_accepts_empty_and_maximum_length(account, description):
+    app, _, _ = account
+    await app.set_policy({"operations": ["*"], "chats": {"*": ["admin"]}})
+    await app.create_channel("Channel", description)
+    await app.create_group("Group", description)
+    await app.set_chat_details(CHAT, description=description)
+    requests = [call[1] for call in app.client.calls if call[0] == "request"][-3:]
+    assert all(request.about == description for request in requests)
+
+
+async def test_unchanged_operations_and_restart_do_not_rewrite_encrypted_state(account):
+    app, _, _ = account
+    await app.set_policy({"operations": ["*"], "chats": {"*": ["read", "write"]}})
+    original = app.session_path.read_bytes()
+    with patch.object(app.store, "save", wraps=app.store.save) as save:
+        await app.get_messages(CHAT)
+        await app.get_members(CHAT)
+        await app.send_text(CHAT, "hello")
+        await app.set_policy(app.policy)
+        save.assert_not_called()
+    await app.on_shutdown()
+    await app.on_startup()
+    assert app.session_path.read_bytes() == original
+
+
+async def test_status_remains_available_while_telegram_operation_waits(account):
+    app, http, _ = account
+    await app.set_policy({"operations": ["send_text"], "chats": {str(CHAT): ["write"]}})
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_send(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return app.client.message(10)
+
+    with patch.object(app.client, "send_message", new=slow_send):
+        operation = asyncio.create_task(app.send_text(CHAT, "hello"))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            async with asyncio.timeout(1):
+                result = await AccountCalls(http).mcp("tools/call", {"name": "get_status"})
+            assert result["result"]["structuredContent"]["authorized"]
+        finally:
+            release.set()
+            await operation
+
+
+async def test_peer_lookup_stops_before_scanning_entire_account(account):
+    app, http, _ = account
+    await app.set_policy({"operations": ["get_messages"], "chats": {str(CHAT): ["read"]}})
+    scanned = []
+
+    async def dialogs(**kwargs):
+        assert kwargs["limit"] == 100
+        for i in range(1000):
+            scanned.append(i)
+            yield SimpleNamespace(id=OTHER, input_entity=None)
+
+    with patch.object(app.client, "get_input_entity", side_effect=ValueError("missing")):
+        with patch.object(app.client, "iter_dialogs", new=dialogs):
+            response = await http.post(
+                "/personal/_account/get_messages",
+                json={"chat_id": CHAT},
+                headers={"Authorization": "Bearer operator"},
+            )
+    assert response.status_code == 409
+    assert "get_chats" in response.text
+    assert len(scanned) == 100
+    assert not any(call[0] == "history" for call in app.client.calls)
+
+
+async def test_session_changes_are_still_persisted_after_operation(account):
+    app, _, key = account
+    await app.set_policy({"operations": ["send_text"], "chats": {str(CHAT): ["write"]}})
+    previous = app.session_path.read_bytes()
+    original_send = app.client.send_message
+
+    async def migrated_send(*args, **kwargs):
+        app.client.session.set_dc(4, "149.154.167.91", 443)
+        return await original_send(*args, **kwargs)
+
+    with patch.object(app.client, "send_message", new=migrated_send):
+        await app.send_text(CHAT, "hello")
+    saved = json.loads(Fernet(key.encode()).decrypt(app.session_path.read_bytes()))
+    assert app.session_path.read_bytes() != previous
+    assert saved["session"] == app.client.session.save()
+    await app.on_shutdown()
+    await app.on_startup()
+    assert app.client.session.dc_id == 4
+    assert (await app.get_status())["authorized"]
+
+
+async def test_paging_dialogs_allows_retry_after_bounded_peer_lookup(account):
+    app, http, _ = account
+    await app.set_policy({"operations": ["get_messages", "get_chats"], "chats": {"*": ["read"]}})
+    entity = await app.client.get_input_entity(CHAT)
+    known = set()
+
+    async def resolve(peer):
+        if peer not in known:
+            raise ValueError("unknown peer")
+        return entity
+
+    async def dialogs(**kwargs):
+        for i in range(min(kwargs["limit"], 151)):
+            peer = CHAT if i == 150 else OTHER - i
+            known.add(peer)
+            yield SimpleNamespace(
+                id=peer, name="Chat", input_entity=entity, is_user=False, is_group=True
+            )
+
+    with patch.object(app.client, "get_input_entity", new=resolve):
+        with patch.object(app.client, "iter_dialogs", new=dialogs):
+            calls = AccountCalls(http)
+            response = await calls.mcp(
+                "tools/call", {"name": "get_messages", "arguments": {"chat_id": CHAT}}
+            )
+            assert "error" in response or response["result"].get("isError")
+            page = await app.get_chats()
+            assert page["next_offset"] == 100
+            page = await app.get_chats(offset=page["next_offset"])
+            assert any(item["id"] == CHAT for item in page["items"])
+            result = await app.get_messages(CHAT)
+            assert result["items"][0]["id"] == 5
+
+
+async def test_unknown_peer_returns_bad_request_after_exhausted_lookup(account):
+    app, _, _ = account
+    await app.set_policy({"operations": ["get_messages"], "chats": {"*": ["read"]}})
+    with patch.object(app.client, "get_input_entity", side_effect=ValueError("unknown")):
+        with pytest.raises(HTTPBadRequest, match="not known"):
+            await app.get_messages(-1000000009999)

@@ -22,7 +22,10 @@ when called from Python. Empty grants deny access. A policy may explicitly grant
 all operations and chats. Telegram's own permissions remain authoritative.
 
 MTProto uses a connected client, with no webhook or application polling loop.
-History and member reads are bounded and paginated. Tools send supplied document
+History and member reads are bounded and paginated. Provider operations are
+serialized with policy and lifecycle changes; status reads never wait for them.
+Startup preserves stored authorization on transient errors. Encrypted state is
+written only when its contents change. Tools send supplied document
 bytes, never arbitrary server files. The calling client owns user confirmation;
 the server enforces configured grants and does not infer approval from tool text.
 """
@@ -79,6 +82,7 @@ ADMIN_RIGHTS = {
     "manage_call",
 }
 DOCUMENT_LIMIT = 5 * 1024 * 1024
+PEER_LOOKUP_LIMIT = 100
 
 
 class _AccountGrammar(ApplicationGrammar):
@@ -120,6 +124,7 @@ class TelegramAccountApplication(McpOpenApiApplication):
         self._factory = client_factory
         self._client = None
         self._store = None
+        self._saved_state = None
         self._policy = {"operations": [], "chats": {}}
         self._account = None
         self._authorized = False
@@ -131,7 +136,7 @@ class TelegramAccountApplication(McpOpenApiApplication):
         kwargs.setdefault("api_name", "_account")
         super().__init__(routing_class=_AccountOperations(self), **kwargs)
         self.route.add_branches({"name": "_admin", "instance": _AccountAdministration(self)})
-        getattr(self.route.router_at_path("_meta"), "auth").configure(rule="admin|telegram_account")
+        self.route.router_at_path("_meta").auth.configure(rule="admin|telegram_account")
 
     def _setting(self, name):
         value = self._settings[name]
@@ -190,6 +195,9 @@ class TelegramAccountApplication(McpOpenApiApplication):
                 raise ValueError("telegram_account.encryption_key is required")
             self._store = _AccountStore(self.session_path, key)
             saved = self.store.open()
+            self._saved_state = copy.deepcopy(saved)
+            self._authorized = False
+            self._account = None
             try:
                 self._policy = self._validate_policy(
                     saved["policy"]
@@ -198,8 +206,14 @@ class TelegramAccountApplication(McpOpenApiApplication):
                 )
                 self._client = self._new_client(saved["session"] if saved else "")
                 await self.client.connect()
-                self._authorized = await self.client.is_user_authorized()
-                self._account = None
+                # Telethon's convenience probe hides every RPCError, including
+                # flood waits and server failures. Only a 401 invalidates a session.
+                try:
+                    await self.client(functions.updates.GetStateRequest())
+                except errors.UnauthorizedError:
+                    self._authorized = False
+                else:
+                    self._authorized = True
                 if self._authorized:
                     me = await self.client.get_me()
                     if me is None or me.bot or (saved and saved.get("account_id") != me.id):
@@ -214,6 +228,8 @@ class TelegramAccountApplication(McpOpenApiApplication):
                         await self.client.disconnect()
                 finally:
                     self._client = None
+                    self._authorized = False
+                    self._account = None
                     self.store.close()
                     self._store = None
                 raise
@@ -246,13 +262,14 @@ class TelegramAccountApplication(McpOpenApiApplication):
         )
 
     def _save(self, policy=None):
-        self.store.save(
-            {
-                "session": self.client.session.save() if self._authorized else "",
-                "account_id": self._account["id"] if self._account else None,
-                "policy": policy if policy is not None else self.policy,
-            }
-        )
+        state = {
+            "session": self.client.session.save() if self._authorized else "",
+            "account_id": self._account["id"] if self._account else None,
+            "policy": policy if policy is not None else self.policy,
+        }
+        if state != self._saved_state:
+            self.store.save(state)
+            self._saved_state = copy.deepcopy(state)
 
     def _clear_login(self):
         self._phone = self._phone_code_hash = None
@@ -307,12 +324,12 @@ class TelegramAccountApplication(McpOpenApiApplication):
             return {"state": "authorized", "account": copy.deepcopy(self._account)}
 
     async def get_status(self) -> dict:
-        async with self.lock:
-            return {
-                "connected": self.client.is_connected(),
-                "authorized": self._authorized,
-                "account": copy.deepcopy(self._account),
-            }
+        # A synchronous snapshot has no await point and needs no provider lock.
+        return {
+            "connected": self.client.is_connected(),
+            "authorized": self._authorized,
+            "account": copy.deepcopy(self._account),
+        }
 
     async def get_policy(self) -> dict:
         return self.policy
@@ -418,6 +435,14 @@ class TelegramAccountApplication(McpOpenApiApplication):
             raise HTTPBadRequest(f"limit must be between 1 and {maximum}")
         return value
 
+    def _offset(self, value):
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 10000:
+            raise HTTPBadRequest("offset must be an integer between 0 and 10000")
+
+    def _description(self, value):
+        if not isinstance(value, str) or len(value) > 255:
+            raise HTTPBadRequest("description must be a string of at most 255 characters")
+
     def _date(self, value):
         if value is None:
             return None
@@ -451,8 +476,7 @@ class TelegramAccountApplication(McpOpenApiApplication):
     async def get_chats(self, limit: int = 100, offset: int = 0) -> dict:
         """List readable dialogs with numeric IDs; names are display/search data only."""
         self._limit(limit)
-        if not isinstance(offset, int) or not 0 <= offset <= 10000:
-            raise HTTPBadRequest("offset must be between 0 and 10000")
+        self._offset(offset)
         return await self._run("get_chats", None, self._get_chats, limit, offset)
 
     async def _get_chats(self, limit, offset):
@@ -491,8 +515,8 @@ class TelegramAccountApplication(McpOpenApiApplication):
     ) -> dict:
         """Read newest-first pages; preserve filters when following next_before_id."""
         self._limit(limit)
-        if before_id < 0:
-            raise HTTPBadRequest("before_id cannot be negative")
+        if not isinstance(before_id, int) or isinstance(before_id, bool) or before_id < 0:
+            raise HTTPBadRequest("before_id must be a nonnegative integer")
         start, end = self._date(since), self._date(until)
         if start and end and start >= end:
             raise HTTPBadRequest("since must precede until")
@@ -513,9 +537,17 @@ class TelegramAccountApplication(McpOpenApiApplication):
         try:
             return await self.client.get_input_entity(peer_id)
         except ValueError:
-            async for dialog in self.client.iter_dialogs():
+            count = 0
+            async for dialog in self.client.iter_dialogs(limit=PEER_LOOKUP_LIMIT):
+                count += 1
                 if dialog.id == peer_id:
                     return dialog.input_entity
+                if count == PEER_LOOKUP_LIMIT:
+                    raise HTTPException(
+                        409,
+                        "Telegram peer lookup reached its limit; page through get_chats "
+                        "to load older dialogs before retrying",
+                    )
             raise HTTPBadRequest("Telegram peer is not known to this account") from None
 
     async def _get_messages(self, chat_id, limit, before_id, start, end, search):
@@ -553,11 +585,14 @@ class TelegramAccountApplication(McpOpenApiApplication):
         self, chat_id: int, filename: str, content_base64: str, caption: str = ""
     ) -> dict:
         if (
-            not filename
+            not isinstance(filename, str)
+            or not filename
             or filename in (".", "..")
             or any(c in filename for c in ("/", "\\", "\x00"))
         ):
             raise HTTPBadRequest("filename must be a simple file name")
+        if not isinstance(content_base64, str):
+            raise HTTPBadRequest("content_base64 must be a base64 string")
         if len(content_base64) > 4 * ((DOCUMENT_LIMIT + 2) // 3):
             raise HTTPBadRequest("document exceeds 5 MiB")
         try:
@@ -566,6 +601,8 @@ class TelegramAccountApplication(McpOpenApiApplication):
             raise HTTPBadRequest("content_base64 must be valid base64") from None
         if not content or len(content) > DOCUMENT_LIMIT:
             raise HTTPBadRequest("document must contain 1 byte to 5 MiB")
+        if not isinstance(caption, str):
+            raise HTTPBadRequest("caption must be a string")
         if caption:
             self._text(caption, 1024)
         return await self._run(
@@ -606,6 +643,8 @@ class TelegramAccountApplication(McpOpenApiApplication):
         )
 
     async def delete_messages(self, chat_id: int, message_ids: list[int]) -> dict:
+        if not isinstance(message_ids, list):
+            raise HTTPBadRequest("message_ids must be a list of positive integers")
         return await self._run(
             "delete_messages", chat_id, self._delete_messages, chat_id, message_ids
         )
@@ -618,11 +657,13 @@ class TelegramAccountApplication(McpOpenApiApplication):
 
     async def create_channel(self, title: str, description: str = "") -> dict:
         self._text(title, 128)
+        self._description(description)
         return await self._run("create_channel", None, self._create_chat, title, description, False)
 
     async def create_group(self, title: str, description: str = "") -> dict:
         """Create a supergroup; invitations and grants are separate explicit operations."""
         self._text(title, 128)
+        self._description(description)
         return await self._run("create_group", None, self._create_chat, title, description, True)
 
     async def _create_chat(self, title, description, group):
@@ -645,6 +686,8 @@ class TelegramAccountApplication(McpOpenApiApplication):
             raise HTTPBadRequest("set exactly one of title or description per call")
         if title is not None:
             self._text(title, 128)
+        if description is not None:
+            self._description(description)
         return await self._run(
             "set_chat_details", chat_id, self._set_chat_details, chat_id, title, description
         )
@@ -664,8 +707,7 @@ class TelegramAccountApplication(McpOpenApiApplication):
 
     async def get_members(self, chat_id: int, limit: int = 100, offset: int = 0) -> dict:
         self._limit(limit)
-        if not 0 <= offset <= 10000:
-            raise HTTPBadRequest("offset must be between 0 and 10000")
+        self._offset(offset)
         return await self._run("get_members", chat_id, self._get_members, chat_id, limit, offset)
 
     async def _get_members(self, chat_id, limit, offset):
@@ -682,9 +724,11 @@ class TelegramAccountApplication(McpOpenApiApplication):
         }
 
     async def invite_members(self, chat_id: int, user_ids: list[int]) -> dict:
+        if not isinstance(user_ids, list):
+            raise HTTPBadRequest("user_ids must be a list of positive integers")
         self._limit(len(user_ids), 20)
-        if any(not isinstance(code, int) or code <= 0 for code in user_ids):
-            raise HTTPBadRequest("user IDs must be positive integers")
+        for user_id in user_ids:
+            self._user_id(user_id)
         return await self._run("invite_members", chat_id, self._invite_members, chat_id, user_ids)
 
     async def _invite_members(self, chat_id, ids):
@@ -712,7 +756,9 @@ class TelegramAccountApplication(McpOpenApiApplication):
 
     async def set_member_admin(self, chat_id: int, user_id: int, rights: list[str]) -> dict:
         self._user_id(user_id)
-        if any(right not in ADMIN_RIGHTS for right in rights):
+        if not isinstance(rights, list) or any(
+            not isinstance(right, str) or right not in ADMIN_RIGHTS for right in rights
+        ):
             raise HTTPBadRequest("unknown administrator right")
         return await self._run(
             "set_member_admin", chat_id, self._set_member_admin, chat_id, user_id, rights
