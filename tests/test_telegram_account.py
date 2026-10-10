@@ -17,18 +17,19 @@
 import asyncio
 import base64
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from filelock import Timeout
-from telethon import errors, functions, utils
+from telethon import errors, events, functions, types, utils
 
 import httpx
 import pytest
 from cryptography.fernet import Fernet, InvalidToken
 from genro_routes import route
 from kajenn import AsgiServer, RoutedApplication
-from kajenn.exceptions import HTTPBadRequest, HTTPForbidden, HTTPUnauthorized
+from kajenn.exceptions import HTTPException, HTTPBadRequest, HTTPForbidden, HTTPUnauthorized
 from kajenn_bot_application.account_store import _AccountStore
 from kajenn_bot_application import TelegramAccountApplication
 from examples.telegram_account.config import TelegramAccountConfiguration
@@ -810,3 +811,502 @@ async def test_unknown_peer_returns_bad_request_after_exhausted_lookup(account):
     with patch.object(app.client, "get_input_entity", side_effect=ValueError("unknown")):
         with pytest.raises(HTTPBadRequest, match="not known"):
             await app.get_messages(-1000000009999)
+
+
+async def test_extended_tools_are_discovered_but_denied_by_default(account):
+    app, http, _ = account
+    tools = (await AccountCalls(http).mcp("tools/list"))["result"]["tools"]
+    names = {tool["name"] for tool in tools}
+    assert {"transcribe_message", "download_media", "send_media", "react_message", "mark_read",
+            "archive_chat", "mute_chat", "pin_message", "block_contact", "set_profile",
+            "get_contacts", "forward_message", "schedule_message", "get_scheduled_messages",
+            "cancel_scheduled_message", "create_poll", "get_poll", "vote_poll"} <= names
+    before = len(app.client.calls)
+    with pytest.raises(HTTPForbidden):
+        await app.download_media(CHAT, 1)
+    with pytest.raises(HTTPForbidden):
+        await app.transcribe_message(CHAT, 1)
+    assert len(app.client.calls) == before
+
+
+async def test_audio_transcription_uses_shared_engine_without_persisting_text(account):
+    app, http, _ = account
+    await app.set_policy({"operations": ["transcribe_message"], "chats": {str(CHAT): ["read"]}})
+    message = app.client.messages[0]
+    message.file = SimpleNamespace(size=5, mime_type="audio/ogg")
+    message.media = object()
+    message.voice, message.audio = True, None
+    app.client.download_chunks = [b"au", b"dio"]
+    engine = AsyncMock(return_value={"text": "Test transcript", "language": "it"})
+    app.transcriber = SimpleNamespace(transcribe=engine)
+    response = await AccountCalls(http).mcp("tools/call", {"name": "transcribe_message",
+                      "arguments": {"chat_id": CHAT, "message_id": message.id}})
+    assert response["result"]["structuredContent"]["text"] == "Test transcript"
+    engine.assert_awaited_once_with(b"audio", "audio/ogg", "it")
+    assert "Test transcript" not in app.session_path.read_text()
+    assert not any(call[0] == "send" for call in app.client.calls)
+
+
+async def test_media_download_checks_metadata_and_actual_stream_size(account):
+    app, _, _ = account
+    await app.set_policy({"operations": ["download_media"], "chats": {str(CHAT): ["read"]}})
+    message = app.client.messages[0]
+    message.media = object()
+    message.file = SimpleNamespace(size=6*1024*1024, mime_type="audio/ogg")
+    app.client.download_chunks = [b"data"]
+    with pytest.raises(HTTPBadRequest):
+        await app.download_media(CHAT, message.id)
+    assert not any(call[0] == "download" for call in app.client.calls)
+    message.file.size = 4
+    app.client.download_chunks = [b"x" * (5*1024*1024), b"x"]
+    with pytest.raises(HTTPBadRequest):
+        await app.download_media(CHAT, message.id)
+    app.client.download_chunks = [b"data"]
+    result = await app.download_media(CHAT, message.id)
+    assert base64.b64decode(result["content_base64"]) == b"data"
+
+
+async def test_transcription_requires_configuration_and_audio(account):
+    app, _, _ = account
+    await app.set_policy({"operations": ["transcribe_message"], "chats": {str(CHAT): ["read"]}})
+    with pytest.raises(HTTPException) as error:
+        await app.transcribe_message(CHAT, 1)
+    assert error.value.status == 503
+    app.transcriber = SimpleNamespace(transcribe=AsyncMock())
+    for message in app.client.messages:
+        message.voice = message.audio = None
+    with pytest.raises(HTTPBadRequest):
+        await app.transcribe_message(CHAT, 1)
+    app.transcriber.transcribe.assert_not_awaited()
+
+
+async def test_forwarding_requires_source_read_and_destination_write(account):
+    app, _, _ = account
+    app.client.forward_messages = AsyncMock(return_value=app.client.message(10, OTHER))
+    await app.set_policy({"operations": ["forward_message", "get_messages"], "chats": {str(OTHER): ["write"]}})
+    with pytest.raises(HTTPForbidden):
+        await app.forward_message(OTHER, CHAT, 1)
+    app.client.forward_messages.assert_not_awaited()
+    await app.set_policy({"operations": ["forward_message", "get_messages"],
+                          "chats": {str(OTHER): ["write"], str(CHAT): ["read"]}})
+    result = await app.forward_message(OTHER, CHAT, 1)
+    assert result["chat_id"] == OTHER
+    assert utils.get_peer_id(app.client.forward_messages.call_args.kwargs["from_peer"]) == CHAT
+
+
+@pytest.mark.parametrize("operation,args,request_type", [
+    ("react_message", (CHAT, 1, "👍"), functions.messages.SendReactionRequest),
+    ("pin_message", (CHAT, 1, True), functions.messages.UpdatePinnedMessageRequest),
+    ("mute_chat", (CHAT, False), functions.account.UpdateNotifySettingsRequest),
+    ("block_contact", (7, True), functions.contacts.BlockRequest),
+    ("set_profile", ("Test", "Name", "About"), functions.account.UpdateProfileRequest),
+])
+async def test_extended_operations_use_typed_requests(account, operation, args, request_type):
+    app, _, _ = account
+    await app.set_policy({"operations": ["*"], "chats": {"*": ["read", "write", "admin"]}})
+    await getattr(app, operation)(*args)
+    request = [call[1] for call in app.client.calls if call[0] == "request"][-1]
+    assert isinstance(request, request_type)
+
+
+async def test_voice_media_and_provider_scheduling(account):
+    app, _, _ = account
+    await app.set_policy({"operations": ["*"], "chats": {"*": ["write"]}})
+    await app.send_media(CHAT, "voice", "note.ogg", base64.b64encode(b"audio").decode())
+    call = [call for call in app.client.calls if call[0] == "file"][-1]
+    assert call[2] == b"audio" and call[4]["voice_note"] is True
+    due = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    await app.schedule_message(CHAT, "Scheduled", due)
+    sent = [call for call in app.client.calls if call[0] == "send"][-1]
+    assert sent[3]["schedule"] == datetime.fromisoformat(due)
+    assert sent[3]["parse_mode"] is None
+
+
+async def test_poll_creation_uses_real_telethon_schema(account):
+    app, _, _ = account
+    await app.set_policy({"operations": ["create_poll"], "chats": {str(CHAT): ["write"]}})
+    app.client.send_message = AsyncMock(return_value=app.client.message(10))
+    await app.create_poll(CHAT, "Question?", ["Yes", "No"])
+    media = app.client.send_message.call_args.kwargs["file"]
+    assert isinstance(media, types.InputMediaPoll)
+    assert media.poll.question.text == "Question?"
+    assert [answer.option for answer in media.poll.answers] == [b"\x00", b"\x01"]
+    bytes(media)  # Real TL serialization validates nested fields, not just mocks.
+
+
+async def test_poll_results_and_votes_preserve_provider_options(account):
+    app, _, _ = account
+    await app.set_policy({"operations": ["get_poll", "vote_poll"], "chats": {str(CHAT): ["read", "write"]}})
+    poll = types.Poll(id=1, hash=7, question=types.TextWithEntities("Question", []),
+                     answers=[types.PollAnswer(types.TextWithEntities("Yes", []), b"opaque")])
+    app.client.messages[0].media = types.MessageMediaPoll(poll, types.PollResults(total_voters=2))
+    result = await app.get_poll(CHAT, 5)
+    assert result["options"][0]["voters"] is None
+    await app.vote_poll(CHAT, 5, [0])
+    assert app.client.calls[-1][1].options == [b"opaque"]
+    with pytest.raises(HTTPBadRequest):
+        await app.vote_poll(CHAT, 5, [1])
+
+
+@pytest.mark.parametrize("operation,args", [
+    ("download_media", (CHAT, True)), ("archive_chat", (CHAT, 1)),
+    ("block_contact", (CHAT, True)), ("vote_poll", (CHAT, 1, [True])),
+    ("transcribe_message", (CHAT, 1, "../it")), ("schedule_message", (CHAT, "Text", "bad")),
+    ("create_poll", (CHAT, "Question", ["same", "same"])),
+])
+async def test_extended_invalid_inputs_never_reach_provider(account, operation, args):
+    app, _, _ = account
+    before = len(app.client.calls)
+    with pytest.raises(HTTPBadRequest):
+        await getattr(app, operation)(*args)
+    assert len(app.client.calls) == before
+
+
+async def test_contact_filtering_precedes_pagination(account):
+    app, _, _ = account
+    await app.set_policy({"operations": ["get_contacts"], "chats": {"8": ["read"]}})
+    users = [SimpleNamespace(id=i, first_name="Test", last_name=None, username=None, bot=False)
+             for i in (7, 8)]
+    with patch.object(FakeTelegram, "__call__", AsyncMock(return_value=SimpleNamespace(users=users))):
+        result = await app.get_contacts(limit=1)
+    assert [item["id"] for item in result["items"]] == [8]
+    assert result["next_offset"] is None
+
+
+async def test_scheduled_listing_and_cancellation_use_scheduled_ids(account):
+    app, _, _ = account
+    await app.set_policy({"operations": ["*"], "chats": {str(CHAT): ["read", "write"]}})
+    messages = [app.client.message(1), app.client.message(2)]
+    with patch.object(FakeTelegram, "__call__", AsyncMock(return_value=SimpleNamespace(messages=messages))) as provider:
+        page = await app.get_scheduled_messages(CHAT, limit=1)
+        assert page["next_offset"] == 1
+        await app.cancel_scheduled_message(CHAT, 2)
+        assert isinstance(provider.call_args.args[0], functions.messages.DeleteScheduledMessagesRequest)
+        assert provider.call_args.args[0].id == [2]
+        before = provider.await_count
+        with pytest.raises(HTTPBadRequest):
+            await app.cancel_scheduled_message(CHAT, 50)
+        assert provider.await_count == before + 1  # History read only; no deletion.
+
+
+async def test_approval_routes_filter_roles_and_record_actual_actor(account):
+    app, http, key = account
+    calls = AccountCalls(http)
+    await calls.policy({"operations": ["*"], "chats": {str(CHAT): ["read", "write"]}})
+    operator = await calls.mcp("tools/list")
+    owner = await calls.mcp("tools/list", token="owner")
+    assert not {"decide_message", "get_audit_log"} & {t["name"] for t in operator["result"]["tools"]}
+    assert {"decide_message", "get_audit_log"} <= {t["name"] for t in owner["result"]["tools"]}
+    response = await calls.mcp("tools/call", {"name": "request_message", "arguments": {
+        "chat_id": CHAT, "text": "private queued text"}})
+    job = response["result"]["structuredContent"]
+    assert job["state"] == "pending" and job["actor"] == "Bearer operator"
+    assert not any(c[0] == "send" for c in app.client.calls)
+    denied = await calls.mcp("tools/call", {"name": "decide_message", "arguments": {
+        "request_id": job["id"], "decision": "approve"}})
+    assert "error" in denied or denied["result"].get("isError")
+    approved = await calls.mcp("tools/call", {"name": "decide_message", "arguments": {
+        "request_id": job["id"], "decision": "approve"}}, token="owner")
+    final = approved["result"]["structuredContent"]
+    assert final["state"] == "submitted" and final["message_id"] == 10
+    assert final["decision_actor"] == "Bearer owner"
+    audit = await app.get_audit_log()
+    assert any(item["actor"] == "Bearer operator" and item["operation"] == "request_message"
+               for item in audit["items"])
+    assert "private queued text" not in json.dumps(audit)
+    disk = app.journal.store.path.read_bytes()
+    assert b"private queued text" not in disk
+    assert "private queued text" in Fernet(key.encode()).decrypt(disk).decode()
+    assert app.journal.store.path.stat().st_mode & 0o777 == 0o600
+
+
+async def test_approval_first_decision_wins_and_restart_does_not_resend(account):
+    app, http, _ = account
+    await AccountCalls(http).policy({"operations": ["*"], "chats": {str(CHAT): ["read", "write"]}})
+    job = await app.request_message(CHAT, "once")
+    results = await asyncio.gather(app.decide_message(job["id"], "approve"),
+                                   app.decide_message(job["id"], "approve"))
+    assert all(r["state"] == "submitted" for r in results)
+    sends = [c for c in app.client.calls if c[0] == "send"]
+    assert len(sends) == 1
+    await app.on_shutdown()
+    await app.on_startup()
+    result = await app.decide_message(job["id"], "approve")
+    assert result["state"] == "submitted"
+    assert not any(c[0] == "send" for c in app.client.calls)
+
+
+@pytest.mark.parametrize("decision", ["reject", "cancel"])
+async def test_approval_reject_cancel_and_current_policy(account, decision):
+    app, http, _ = account
+    calls = AccountCalls(http)
+    await calls.policy({"operations": ["*"], "chats": {str(CHAT): ["read", "write"]}})
+    job = await app.request_message(CHAT, "never send")
+    await calls.policy({"operations": ["decide_message"], "chats": {str(CHAT): ["read"]}})
+    with pytest.raises(HTTPForbidden):
+        await app.decide_message(job["id"], "approve")
+    await calls.policy({"operations": ["decide_message"], "chats": {str(CHAT): ["read", "write"]}})
+    result = await app.decide_message(job["id"], decision)
+    assert result["state"] == ("rejected" if decision == "reject" else "cancelled")
+    assert (await app.decide_message(job["id"], "approve"))["state"] == result["state"]
+    assert not any(c[0] == "send" for c in app.client.calls)
+
+
+async def test_approval_uncertain_send_and_interrupted_restart(account):
+    app, http, _ = account
+    await AccountCalls(http).policy({"operations": ["*"], "chats": {str(CHAT): ["read", "write"]}})
+    job = await app.request_message(CHAT, "uncertain")
+    app.client.failure = ConnectionError("private provider failure")
+    with pytest.raises(HTTPException):
+        await app.decide_message(job["id"], "approve")
+    assert (await app.decide_message(job["id"], "approve"))["state"] == "unconfirmed"
+    second = await app.request_message(CHAT, "interrupted")
+    app.journal.update_job(second, state="sending")
+    await app.on_shutdown()
+    await app.on_startup()
+    assert (await app.decide_message(second["id"], "approve"))["state"] == "unconfirmed"
+    assert not any(c[0] == "send" for c in app.client.calls)
+    assert "private provider failure" not in json.dumps(await app.get_audit_log())
+
+
+async def test_requests_and_journal_are_bound_to_account_identity(account):
+    app, http, _ = account
+    await AccountCalls(http).policy({"operations": ["*"], "chats": {"*": ["read", "write"]}})
+    job = await app.request_message(CHAT, "old account only")
+    await app.revoke_session()
+    await app.start_login("+39000000000")
+    app.client.me.id = 8
+    await app.complete_login(code="12345")
+    assert (await app.get_message_requests())["items"] == []
+    with pytest.raises(HTTPException) as error:
+        await app.decide_message(job["id"], "approve")
+    assert error.value.status == 404
+
+
+async def test_events_receive_edit_delete_filter_and_replay_after_restart(account):
+    app, http, _ = account
+    calls = AccountCalls(http)
+    await calls.policy({"operations": ["*"], "chats": {"*": ["read", "write"]}})
+    assert app.client.settings["receive_updates"] is True
+    assert len(app.client.handlers) == 3
+    for chat_id in (OTHER, CHAT):
+        message = types.Message(id=12, peer_id=utils.resolve_id(chat_id)[1](
+            utils.resolve_id(chat_id)[0]), message="not journalled", date=datetime.now(timezone.utc))
+        for event in (events.NewMessage.Event(message), events.MessageEdited.Event(message),
+                      events.MessageDeleted.Event([12], peer=message.peer_id)):
+            event._client = app.client
+            await app._record_event(event)
+    unknown = events.MessageDeleted.Event([42], peer=None)
+    unknown._client = app.client
+    await app._record_event(unknown)
+    assert (await app.get_status())["unscoped_deletions"] == 1
+    await calls.policy({"operations": ["*"], "chats": {str(CHAT): ["read"]}})
+    first = await app.get_events(limit=2)
+    assert [e["kind"] for e in first["items"]] == ["message_received", "message_edited"]
+    assert all(e["chat_id"] == CHAT for e in first["items"])
+    assert first["has_more"] is True and not first["retention_gap"]
+    await app.on_shutdown()
+    await app.on_startup()
+    rest = await app.get_events(after_id=first["next_after_id"])
+    assert [e["kind"] for e in rest["items"]] == ["message_deleted"]
+    assert "not journalled" not in json.dumps(rest)
+    assert not (await app.get_events(after_id=rest["next_after_id"]))["items"]
+
+
+async def test_journal_retention_and_queue_bounds(account):
+    app, http, _ = account
+    await AccountCalls(http).policy({"operations": ["*"], "chats": {"*": ["read", "write"]}})
+    app.journal.retention = 2
+    for code in range(3):
+        app.journal.append("events", app.account_id, chat_id=CHAT, message_id=code, kind="message_received")
+    result = await app.get_events()
+    assert result["retention_gap"] and len(result["items"]) == 2
+    first = await app.request_message(CHAT, "one")
+    await app.request_message(CHAT, "two")
+    with pytest.raises(HTTPException):
+        await app.request_message(CHAT, "full")
+    await app.decide_message(first["id"], "reject")
+    assert (await app.request_message(CHAT, "space"))["state"] == "pending"
+
+
+@pytest.mark.parametrize("method,args", [
+    ("get_events", {"after_id": True}), ("get_audit_log", {"limit": 0}),
+    ("request_message", {"chat_id": True, "text": "no"}),
+    ("get_message_requests", {"offset": -1}),
+    ("decide_message", {"request_id": "x", "decision": "maybe"}),
+])
+async def test_journal_invalid_inputs(account, method, args):
+    app, http, _ = account
+    await AccountCalls(http).policy({"operations": ["*"], "chats": {"*": ["read", "write"]}})
+    with pytest.raises(HTTPBadRequest):
+        await getattr(app, method)(**args)
+
+
+async def test_approval_only_policy_cannot_be_bypassed_with_direct_send(account):
+    app, http, _ = account
+    calls = AccountCalls(http)
+    await calls.policy({"operations": ["request_message", "decide_message", "get_message_requests"],
+                        "chats": {str(CHAT): ["read", "write"]}})
+    job = await app.request_message(CHAT, "approved flow only")
+    with pytest.raises(HTTPForbidden):
+        await app.send_text(CHAT, "bypass")
+    assert (await app.decide_message(job["id"], "approve"))["state"] == "submitted"
+
+
+async def test_cancelled_approval_is_uncertain_and_cannot_be_retried(account):
+    app, http, _ = account
+    await AccountCalls(http).policy({"operations": ["*"], "chats": {str(CHAT): ["read", "write"]}})
+    job = await app.request_message(CHAT, "interrupted")
+    app.client.failure = asyncio.CancelledError()
+    with pytest.raises(asyncio.CancelledError):
+        await app.decide_message(job["id"], "approve")
+    assert (await app.decide_message(job["id"], "approve"))["state"] == "unconfirmed"
+    assert len([c for c in app.client.calls if c[0] == "send"]) == 1
+
+
+async def test_journal_write_failure_prevents_provider_send(account):
+    app, http, _ = account
+    await AccountCalls(http).policy({"operations": ["*"], "chats": {str(CHAT): ["read", "write"]}})
+    job = await app.request_message(CHAT, "durable before send")
+    with patch.object(app.journal.store, "save", side_effect=OSError("disk unavailable")):
+        with pytest.raises(OSError):
+            await app.decide_message(job["id"], "approve")
+    assert not any(c[0] == "send" for c in app.client.calls)
+    assert app.journal.get_job(app.account_id, job["id"])["state"] == "pending"
+
+
+async def test_events_from_replaced_client_are_ignored_and_callback_failure_visible(account):
+    app, http, _ = account
+    await AccountCalls(http).policy({"operations": ["*"], "chats": {str(CHAT): ["read"]}})
+    old_client = app.client
+    await app.on_shutdown()
+    await app.on_startup()
+    event = events.MessageDeleted.Event([99], peer=types.PeerChannel(100))
+    event._client = old_client
+    await app._record_event(event)
+    assert not (await app.get_events())["items"]
+    event._client = app.client
+    with patch.object(app.journal.store, "save", side_effect=OSError("disk unavailable")):
+        with pytest.raises(OSError):
+            await app._record_event(event)
+    assert (await app.get_status())["event_errors"] == 1
+
+
+async def test_queue_pagination_filters_chats_before_offset(account):
+    app, http, _ = account
+    calls = AccountCalls(http)
+    await calls.policy({"operations": ["*"], "chats": {"*": ["read", "write"]}})
+    hidden = await app.request_message(OTHER, "hidden")
+    visible = await app.request_message(CHAT, "visible")
+    await calls.policy({"operations": ["*"], "chats": {str(CHAT): ["read", "write"]}})
+    page = await app.get_message_requests(limit=1)
+    assert [job["id"] for job in page["items"]] == [visible["id"]]
+    assert page["next_offset"] is None
+    with pytest.raises(HTTPException) as exc:
+        await app.decide_message(hidden["id"], "approve")
+    assert exc.value.status == 404
+
+
+async def test_sending_state_is_durable_before_provider_call(account):
+    app, http, key = account
+    await AccountCalls(http).policy({"operations": ["*"], "chats": {str(CHAT): ["read", "write"]}})
+    job = await app.request_message(CHAT, "exact approved content")
+
+    async def inspect_durable_request(entity, text, **kwargs):
+        persisted = json.loads(Fernet(key.encode()).decrypt(app.journal.store.path.read_bytes()))
+        stored = next(item for item in persisted["jobs"] if item["id"] == job["id"])
+        assert stored["state"] == "sending" and stored["decision_actor"] == "trusted-python"
+        assert text == stored["text"] == "exact approved content"
+        return app.client.message(10)
+
+    app.client.send_message = AsyncMock(side_effect=inspect_durable_request)
+    assert (await app.decide_message(job["id"], "approve"))["state"] == "submitted"
+
+
+async def test_corrupt_journal_fails_startup_preserving_session(account):
+    app, http, _ = account
+    await AccountCalls(http).policy({"operations": ["*"], "chats": {str(CHAT): ["read", "write"]}})
+    await app.request_message(CHAT, "preserve session")
+    path = app.journal.store.path
+    original = path.read_bytes()
+    await app.on_shutdown()
+    session = app.session_path.read_bytes()
+    path.write_bytes(b"corrupt")
+    with pytest.raises(InvalidToken):
+        await app.on_startup()
+    assert app.session_path.read_bytes() == session
+    path.write_bytes(original)
+    await app.on_startup()
+    assert (await app.get_status())["authorized"]
+    assert len((await app.get_message_requests())["items"]) == 1
+
+
+@pytest.mark.parametrize("name,arguments", [
+    ("download_media", {"chat_id": CHAT, "message_id": 1}),
+    ("react_message", {"chat_id": CHAT, "message_id": 1, "reaction": "👍"}),
+    ("mark_read", {"chat_id": CHAT, "message_id": 1}),
+    ("archive_chat", {"chat_id": CHAT}),
+    ("mute_chat", {"chat_id": CHAT}),
+    ("pin_message", {"chat_id": CHAT, "message_id": 1}),
+    ("block_contact", {"chat_id": 7}),
+    ("set_profile", {"first_name": "Name"}),
+    ("get_contacts", {}),
+    ("forward_message", {"chat_id": CHAT, "source_chat_id": OTHER, "message_id": 1}),
+    ("schedule_message", {"chat_id": CHAT, "text": "Later", "due": "future"}),
+    ("get_scheduled_messages", {"chat_id": CHAT}),
+    ("cancel_scheduled_message", {"chat_id": CHAT, "message_id": 1}),
+    ("create_poll", {"chat_id": CHAT, "question": "Which?", "options": ["A", "B"]}),
+    ("get_poll", {"chat_id": CHAT, "message_id": 1}),
+    ("vote_poll", {"chat_id": CHAT, "message_id": 1, "choices": []}),
+    ("send_media", {"chat_id": CHAT, "kind": "photo", "filename": "x.jpg", "content_base64": "eA=="}),
+    ("get_events", {}), ("get_message_requests", {}), ("get_audit_log", {}),
+])
+async def test_each_extended_mcp_route_enforces_account_policy(account, name, arguments):
+    app, http, _ = account
+    arguments = dict(arguments)
+    if name == "schedule_message":
+        arguments["due"] = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    before = list(app.client.calls)
+    response = await http.post("/personal/_account/" + name, json=arguments,
+                               headers={"Authorization": "Bearer owner"})
+    assert response.status_code == 403
+    assert app.client.calls == before
+    result = await AccountCalls(http).mcp("tools/call", {"name": name, "arguments": arguments}, token="owner")
+    assert "error" in result or result["result"].get("isError")
+    assert app.client.calls == before
+
+
+@pytest.mark.parametrize("name,args", [
+    ("react_message", (CHAT, 1, "x" * 33)),
+    ("mute_chat", (CHAT, 1)), ("pin_message", (CHAT, 1, 1)),
+    ("block_contact", (7, 1)), ("set_profile", ("",)),
+    ("set_profile", ("Name", "x" * 65)), ("set_profile", ("Name", "", "x" * 71)),
+    ("schedule_message", (CHAT, "", "bad")),
+    ("schedule_message", (CHAT, "Text", "2000-01-01T00:00:00Z")),
+    ("send_media", (CHAT, "invalid", "x", "eA==")),
+    ("send_media", (CHAT, "photo", "../x", "eA==")),
+    ("send_media", (CHAT, "photo", "x", 1)),
+    ("send_media", (CHAT, "photo", "x", "!!")),
+    ("send_media", (CHAT, "photo", "x", "")),
+    ("send_media", (CHAT, "photo", "x", "eA==", "x" * 1025)),
+    ("send_media", (CHAT, "voice", "x", "eA==", "caption")),
+])
+async def test_extended_input_boundaries_fail_before_provider(account, name, args):
+    app, _, _ = account
+    before = list(app.client.calls)
+    with pytest.raises(HTTPBadRequest):
+        await getattr(app, name)(*args)
+    assert app.client.calls == before
+
+
+async def test_read_and_archive_use_selected_chat_and_message(account):
+    app, _, _ = account
+    await app.set_policy({"operations": ["mark_read", "archive_chat"], "chats": {str(CHAT): ["write"]}})
+    app.client.send_read_acknowledge = AsyncMock()
+    app.client.edit_folder = AsyncMock()
+    await app.mark_read(CHAT, 1)
+    assert utils.get_peer_id(app.client.send_read_acknowledge.call_args.args[0]) == CHAT
+    assert app.client.send_read_acknowledge.call_args.kwargs == {"max_id": 1}
+    await app.archive_chat(CHAT, False)
+    assert utils.get_peer_id(app.client.edit_folder.call_args.args[0]) == CHAT
+    assert app.client.edit_folder.call_args.kwargs == {"folder": 0}

@@ -50,12 +50,33 @@ local and policy management is restricted to an administrator.
 See the [personal account guide](docs/guides/telegram-account.md). Personal account
 access and REST/MCP bot administration are included in the **0.2.0b1 beta**.
 
+The current source version is **0.3.0b1 (beta)**, pending publication.
+It expands the personal Telegram account to **37 MCP
+tools**, including media, local voice transcription, reactions, contacts, polls,
+native Telegram scheduling, encrypted event replay and audit, and administrator-approved
+text requests. Install `.[transcription]` for the optional
+shared local speech engine. These additions are not yet in the PyPI release.
+
+## Personal WhatsApp account prototype
+
+The source-tree `examples/whatsapp_account` application exposes 76 authenticated
+REST/MCP tools for contacts, synchronized messages, replies, media, chat state,
+groups, channels, communities, polls, events, profile, privacy, policy and audit.
+It includes scheduled texts with optional approval, an event journal, multiple
+account mounts, optional local voice transcription and in-process event subscriptions without polling. It uses a pinned, locally patched Tryx build and
+is **not included in the published wheel**. Device and directory storage use
+private filesystem permissions, without encryption at rest.
+
+See the [prototype guide](docs/guides/whatsapp-account-prototype.rst) for setup,
+command contracts, permission rules and history coverage limits.
+
 ## Install
 
 Python **3.11–3.14** is tested. `kajenn>=0.4.1` is installed as a dependency.
 Bot versions and releases are independent from the server.
 
-Install the beta in a virtual environment:
+Install the published 0.2.0b1 beta in a virtual environment. For the pending
+0.3.0b1 beta, install the source checkout as described below:
 
 ```bash
 python -m venv .venv
@@ -123,9 +144,9 @@ the known customer service window.
 
 ## Scope and delivery guarantees
 
-This package uses official bot/business APIs. It does not provide personal-account
-sessions, group history imports, automatic application-user provisioning, or a
-public bot-management API. Admission does not grant kajenn router permissions.
+The bot applications use official bot/business APIs. Personal-account access is
+a separate application surface with its own permissions and history limitations.
+Admission does not provision application users or grant kajenn router permissions.
 
 The filesystem examples support **one receiving process per registry**. Webhook
 acknowledgement means work has been staged, not that a reply was delivered.

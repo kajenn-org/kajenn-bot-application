@@ -1,12 +1,13 @@
 # Personal Telegram account
 
-**Document version:** 0.2 · **Last updated:** 2026-10-09 · **Status:** 🔴 UNDER REVIEW
+**Document version:** 0.3 · **Last updated:** 2026-10-10 · **Status:** 🔴 UNDER REVIEW
 
 `TelegramAccountApplication` connects one personal Telegram account through
 MTProto. It is a separate application in the same distribution as the Telegram
 and WhatsApp bots. It does not inherit bot registration, webhook processing or
 bot conversations. Multiple accounts require separate mounts, state files and
-keys. This application is included in the `0.2.0b1` beta release.
+keys. The base application is included in `0.2.0b1`. The `0.3.0b1` source version extends it to
+37 MCP tools; the additions below are not yet published on PyPI.
 
 Use it for a local developer service: an authenticated MCP client can read a
 permitted group's history, send a message, or create and administer a channel
@@ -18,7 +19,8 @@ using a personal session does not override Telegram's sender presentation.
 
 Install the beta with `python -m pip install "kajenn-bot-application==0.2.0b1"`.
 To use the enrollment and configuration examples below, clone the repository,
-switch to tag `v0.2.0b1`, and install it with `python -m pip install .`.
+use the current source checkout for the expanded commands, and install it with
+`python -m pip install .`. Tag `v0.2.0b1` contains the original command set.
 The examples are included in the source checkout, not the installed wheel.
 The package includes Telethon, cryptography and filelock; kajenn 0.4.1 or newer
 provides authenticated REST/MCP discovery. There is no webhook or polling loop:
@@ -174,16 +176,18 @@ curl --fail-with-body http://127.0.0.1:8000/personal/_admin/set_policy \
 For `/get_policy` and `/revoke_session`, send `{}`. A policy change is saved before
 it becomes active. It is serialized with ongoing operations and cannot undo an
 operation already sent to Telegram. Provider operations run one at a time, with
-a 45-second timeout per operation; this keeps policy changes, logout and message
+a 45-second timeout per operation (180 seconds for transcription); this keeps policy changes, logout and message
 mutations ordered. Status and policy reads do not join that queue. The encrypted
 file is written and synchronized only when the session, identity or policy
 changes, not after every history read.
 
-**Confirmations belong to the calling client.** Configure the MCP client to ask
-before sends, deletions, invitations and role changes. The application enforces
-grants but does not provide a second approval queue or treat tool arguments as
-proof of human approval. Administrators can constrain individual operation names
-in addition to chat categories.
+**Direct actions and queued approvals are distinct grants.** Configure the MCP
+client to confirm direct sends, deletions, invitations and role changes. For
+administrator-approved texts, grant `request_message` and `decide_message` but
+omit direct sending operations (including `send_text`, `send_media`,
+`send_document`, `forward_message` and `schedule_message`). An operator can then
+propose text but only an authenticated administrator can decide it. Neither a
+message nor a tool argument can claim the administrator role.
 
 ## Operations
 
@@ -225,7 +229,7 @@ Send JSON-RPC to `/personal/_mcp` with the operator Bearer token:
       "chat_id": -1001234567890,
       "limit": 100,
       "since": "2026-10-01T00:00:00Z",
-      "until": "2026-10-09T00:00:00Z"
+      "until": "2026-10-10T00:00:00Z"
     }
   }
 }
@@ -281,3 +285,194 @@ credential isolation, paging, revocation and error handling. Before production,
 perform an owner-controlled smoke test: local login, inspect the new device,
 read a permitted test chat, send one approved message, and revoke the device.
 No live account is required by the automated suite.
+
+## Expanded account commands
+
+The account exposes 37 MCP tools. The following eighteen extensions use the
+same `telegram_account` avatar role and independently checked operation policy.
+They are account operations, not Telegram Bot API commands.
+
+| Command | Chat grant | Contract |
+|---|---|---|
+| `download_media` | read | Download selected media as bytes, bounded to 5 MiB. |
+| `transcribe_message` | read | Transcribe selected audio with the configured engine; no automatic reply. |
+| `react_message` | write | Set an emoji reaction, or remove it with an empty string. |
+| `mark_read` | write | Mark messages read up to the selected message. |
+| `archive_chat` | write | Archive or unarchive a chat. |
+| `mute_chat` | write | Mute a chat until 2038 or restore notifications. |
+| `pin_message` | admin | Pin or unpin a message without a notification. |
+| `block_contact` | admin | Block or unblock a personal Telegram contact. |
+| `set_profile` | Account-wide | Set account name and about text; empty optional fields clear them. |
+| `get_contacts` | Account-wide | List readable contacts with policy filtering before pagination. |
+| `forward_message` | write | Forward one message; requires source history permission and destination write permission. |
+| `schedule_message` | write | Schedule text on Telegram using an ISO 8601 date with timezone. |
+| `get_scheduled_messages` | read | Read messages scheduled on Telegram for this chat. |
+| `cancel_scheduled_message` | write | Cancel an outgoing scheduled message by its scheduled-message ID. |
+| `create_poll` | write | Create an anonymous poll with two to ten options. |
+| `get_poll` | read | Read poll choices and provider results; unknown counts remain null. |
+| `vote_poll` | write | Vote using option indexes from get_poll; an empty list retracts your vote. |
+| `send_media` | write | Send photo, video, audio, voice or sticker bytes; never read server paths. |
+
+### Media and local transcription
+
+`send_media` accepts `photo`, `video`, `audio`, `voice` and `sticker`. Supply
+base64 bytes and a simple filename with a compatible extension; the application
+does not transcode formats or read arbitrary paths. Stickers carry an explicit
+Telegram sticker attribute. Media must fit within 5 MiB. Download validates both
+the advertised length and the received byte count before returning content.
+
+`transcribe_message(chat_id, message_id, language="it")` requires an audio or
+voice message. `language="auto"` enables language detection. The downloaded audio
+is passed to the same optional speech engine used by the WhatsApp account
+prototype. It returns text without storing the transcript or sending a reply.
+The feature returns 503 when no engine is configured, before downloading media.
+
+Install the optional dependencies from this checkout:
+
+```bash
+python -m pip install '.[transcription]'
+```
+
+Provide an existing local CTranslate2 model directory with the constructor
+argument `transcription_model="/absolute/path/to/model"`, or with the same field
+in the `telegram_account(...)` grammar. Models are not downloaded implicitly.
+The shared worker uses offline faster-whisper, a subprocess, a five-minute audio
+limit and a 170-second worker timeout. The complete operation has a 180-second
+timeout and holds the account operation lock; cancellation terminates the worker.
+
+A trusted application may instead inject `transcriber=engine`, implementing
+`async transcribe(content, mimetype, language) -> dict`. The MCP caller cannot
+choose a server path, executable or external endpoint. Hosted speech recognition
+is never selected implicitly.
+
+### Forwarding, polls and scheduling
+
+Forwarding requires the `forward_message` grant and destination `write`, plus
+`get_messages` and source `read`. Source and destination are checked before the
+forward request. Numeric IDs and message membership are validated explicitly.
+Contact listing filters by readable user IDs before pagination.
+
+Polls are anonymous, with two to ten unique options. `get_poll` returns option
+indexes and the provider's current counts; missing counts remain null. Use these
+indexes in `vote_poll`; an empty list requests vote retraction. Telegram may
+reject voting in a closed poll or a disallowed chat. Poll closing and quizzes
+are not included in these additions.
+
+`schedule_message` accepts `due` as ISO 8601 with timezone, within one year.
+Telegram stores the scheduled message, so stopping the application does not
+cancel it. `get_scheduled_messages` is paginated; cancellation uses the returned
+scheduled-message ID, which must not be confused with a delivered-message ID.
+This is native Telegram scheduling, without the WhatsApp prototype's local
+approval queue. Once submitted, later local policy changes do not cancel it:
+use `cancel_scheduled_message` explicitly while the caller has permission.
+
+### Verification and remaining differences
+
+Tests use a fake Telegram transport, actual Telethon request types and real TL
+serialization for polls. They cover deny-by-default policy, cross-chat forwarding,
+media limits, transcription delegation, invalid inputs and caller-filtered MCP
+discovery. They do not send messages or change a real Telegram account.
+
+These additions do not establish full parity with the WhatsApp prototype.
+Telegram account privacy settings, profile/group photos and admission workflows
+remain separate work. Existing encrypted session persistence is preserved. Multiple accounts
+continue to use separate application mounts and state files.
+
+
+## Persistent events, audit and approved texts
+
+These five additional tools are available through MCP and REST:
+
+| Tool | Avatar role | Operation and chat policy |
+|---|---|---|
+| `get_events(after_id=0, limit=100)` | `telegram_account` | `get_events`; read on returned chats |
+| `request_message(chat_id, text)` | `telegram_account` | `request_message`; write on destination |
+| `get_message_requests(limit=100, offset=0)` | `telegram_account` or `admin` | `get_message_requests`; read on returned chats |
+| `decide_message(request_id, decision)` | `admin` | `decide_message`; read and write on destination |
+| `get_audit_log(after_id=0, limit=100)` | `admin` | `get_audit_log`; read on chat-specific records |
+
+The server's existing avatar filtering controls discovery and invocation.
+Calling Python methods is a trusted administrative integration; it still checks
+operation/chat policy but has no HTTP avatar. Such audit records use
+`trusted-python`. Login, policy changes and session revocation remain outside MCP.
+
+### Event replay
+
+The connected Telethon client delivers new, edited and deleted message events;
+there is no application polling loop. The application stores identifiers and a
+local observation timestamp for readable chats, never message bodies. New
+message events (`message_received`) include incoming and outgoing messages.
+Events from unreadable chats are dropped on receipt, and current permissions
+are applied again before pagination. Use `get_messages` for authorized content.
+
+Save `next_after_id` and supply it as `after_id` on the next call; `has_more`
+indicates another page. The cursor survives application restarts.
+`retention_gap` reports records removed by the bounded journal. Replaying events
+is a pull API; it does not initiate MCP notifications or deliver callbacks to
+remote consumers. This is an observation journal, not a complete historical feed:
+updates missed while disconnected or before login are not backfilled. Duplicate
+provider events may produce multiple journal records.
+
+Telegram sometimes omits the chat from deletion updates. These updates are
+ignored rather than attributed to a guessed chat; `get_status` reports
+`unscoped_deletions`. Callback persistence failures increment `event_errors`.
+Both diagnostic counters reset when the application object is recreated. See
+[Telethon deletion events](https://docs.telethon.dev/en/stable/modules/events.html#telethon.events.messagedeleted.MessageDeleted)
+for provider coverage limitations.
+
+### Approval contract
+
+1. `request_message` persists an immutable text proposal in `pending` state and
+   returns its request ID, destination, text and proposing avatar identity.
+2. An administrator reviews it using `get_message_requests` and calls
+   `decide_message` with `approve`, `reject` or `cancel`.
+3. Approval rechecks the operation and destination grants, records the deciding
+   identity and `sending` state durably, then sends the exact stored text.
+4. A successful send becomes `submitted` with the provider message ID. Concurrent
+   or repeated decisions return the settled record without resending. Rejection
+   and cancellation are final and send nothing.
+
+`decide_message` is its own sending grant: it does not require `send_text`.
+This allows approval-only policies without enabling direct operator sends.
+For example, an administrator can configure:
+
+```json
+{
+  "operations": ["request_message", "get_message_requests", "decide_message", "get_events", "get_audit_log"],
+  "chats": {"-1001234567890": ["read", "write"]}
+}
+```
+
+A failed or cancelled provider call becomes `unconfirmed`, as does a `sending`
+record found at restart. No automatic retry occurs. Inspect Telegram before
+creating a replacement request. A submitted message cannot be cancelled through
+this queue; deleting it requires the separate `delete_messages` permission.
+Approval sends immediately and does not schedule background work. Native
+`schedule_message` remains a separate Telegram scheduling feature.
+
+Records are bound to the Telegram account ID. Logging in as another account does
+not expose or dispatch the previous account's jobs, audit or events. Changing
+back to the original account restores access subject to current grants.
+
+### Storage and audit scope
+
+The journal is an additional file named `<session_path>.journal.enc`, encrypted
+with the configured session key and restricted to mode 0600. It reuses the
+session store's exclusive lease and atomic replacement implementation. Keep the
+session and journal files together in backups. No additional storage service is
+required, and the session-file write-on-change contract is unchanged.
+
+Retention is 1,000 events, 1,000 audit entries and 1,000 text requests per mount.
+The oldest settled request is removed when space is needed; pending and
+unconfirmed requests are never silently discarded. A queue containing only
+unresolved requests rejects new proposals when full. Snapshots are rewritten
+atomically on each change; this filesystem implementation targets modest traffic.
+
+Audit records contain operation, authenticated identity, optional chat ID,
+timestamp and result category. They exclude text, credentials and provider
+exception details. They cover operations entering the execution wrapper, not
+HTTP requests rejected by routing/authentication, argument validation before the
+wrapper, status reads, local login, policy changes or session revocation. Queue
+records additionally retain the proposing and deciding identity. Reading audit
+does not itself append audit records. An audit persistence failure before an
+operation prevents that operation from reaching Telegram.
