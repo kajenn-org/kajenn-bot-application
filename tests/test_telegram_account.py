@@ -1239,3 +1239,74 @@ async def test_corrupt_journal_fails_startup_preserving_session(account):
     await app.on_startup()
     assert (await app.get_status())["authorized"]
     assert len((await app.get_message_requests())["items"]) == 1
+
+
+@pytest.mark.parametrize("name,arguments", [
+    ("download_media", {"chat_id": CHAT, "message_id": 1}),
+    ("react_message", {"chat_id": CHAT, "message_id": 1, "reaction": "👍"}),
+    ("mark_read", {"chat_id": CHAT, "message_id": 1}),
+    ("archive_chat", {"chat_id": CHAT}),
+    ("mute_chat", {"chat_id": CHAT}),
+    ("pin_message", {"chat_id": CHAT, "message_id": 1}),
+    ("block_contact", {"chat_id": 7}),
+    ("set_profile", {"first_name": "Name"}),
+    ("get_contacts", {}),
+    ("forward_message", {"chat_id": CHAT, "source_chat_id": OTHER, "message_id": 1}),
+    ("schedule_message", {"chat_id": CHAT, "text": "Later", "due": "future"}),
+    ("get_scheduled_messages", {"chat_id": CHAT}),
+    ("cancel_scheduled_message", {"chat_id": CHAT, "message_id": 1}),
+    ("create_poll", {"chat_id": CHAT, "question": "Which?", "options": ["A", "B"]}),
+    ("get_poll", {"chat_id": CHAT, "message_id": 1}),
+    ("vote_poll", {"chat_id": CHAT, "message_id": 1, "choices": []}),
+    ("send_media", {"chat_id": CHAT, "kind": "photo", "filename": "x.jpg", "content_base64": "eA=="}),
+    ("get_events", {}), ("get_message_requests", {}), ("get_audit_log", {}),
+])
+async def test_each_extended_mcp_route_enforces_account_policy(account, name, arguments):
+    app, http, _ = account
+    arguments = dict(arguments)
+    if name == "schedule_message":
+        arguments["due"] = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    before = list(app.client.calls)
+    response = await http.post("/personal/_account/" + name, json=arguments,
+                               headers={"Authorization": "Bearer owner"})
+    assert response.status_code == 403
+    assert app.client.calls == before
+    result = await AccountCalls(http).mcp("tools/call", {"name": name, "arguments": arguments}, token="owner")
+    assert "error" in result or result["result"].get("isError")
+    assert app.client.calls == before
+
+
+@pytest.mark.parametrize("name,args", [
+    ("react_message", (CHAT, 1, "x" * 33)),
+    ("mute_chat", (CHAT, 1)), ("pin_message", (CHAT, 1, 1)),
+    ("block_contact", (7, 1)), ("set_profile", ("",)),
+    ("set_profile", ("Name", "x" * 65)), ("set_profile", ("Name", "", "x" * 71)),
+    ("schedule_message", (CHAT, "", "bad")),
+    ("schedule_message", (CHAT, "Text", "2000-01-01T00:00:00Z")),
+    ("send_media", (CHAT, "invalid", "x", "eA==")),
+    ("send_media", (CHAT, "photo", "../x", "eA==")),
+    ("send_media", (CHAT, "photo", "x", 1)),
+    ("send_media", (CHAT, "photo", "x", "!!")),
+    ("send_media", (CHAT, "photo", "x", "")),
+    ("send_media", (CHAT, "photo", "x", "eA==", "x" * 1025)),
+    ("send_media", (CHAT, "voice", "x", "eA==", "caption")),
+])
+async def test_extended_input_boundaries_fail_before_provider(account, name, args):
+    app, _, _ = account
+    before = list(app.client.calls)
+    with pytest.raises(HTTPBadRequest):
+        await getattr(app, name)(*args)
+    assert app.client.calls == before
+
+
+async def test_read_and_archive_use_selected_chat_and_message(account):
+    app, _, _ = account
+    await app.set_policy({"operations": ["mark_read", "archive_chat"], "chats": {str(CHAT): ["write"]}})
+    app.client.send_read_acknowledge = AsyncMock()
+    app.client.edit_folder = AsyncMock()
+    await app.mark_read(CHAT, 1)
+    assert utils.get_peer_id(app.client.send_read_acknowledge.call_args.args[0]) == CHAT
+    assert app.client.send_read_acknowledge.call_args.kwargs == {"max_id": 1}
+    await app.archive_chat(CHAT, False)
+    assert utils.get_peer_id(app.client.edit_folder.call_args.args[0]) == CHAT
+    assert app.client.edit_folder.call_args.kwargs == {"folder": 0}
