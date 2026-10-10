@@ -50,7 +50,8 @@ local and policy management is restricted to an administrator.
 See the [personal account guide](docs/guides/telegram-account.md). Personal account
 access and REST/MCP bot administration are included in the **0.2.0b1 beta**.
 
-The current source checkout expands the personal Telegram account to **37 MCP
+The current source version is **0.3.0b1 (beta)**, pending publication.
+It expands the personal Telegram account to **37 MCP
 tools**, including media, local voice transcription, reactions, contacts, polls,
 native Telegram scheduling, encrypted event replay and audit, and administrator-approved
 text requests. Install `.[transcription]` for the optional
@@ -74,7 +75,8 @@ command contracts, permission rules and history coverage limits.
 Python **3.11–3.14** is tested. `kajenn>=0.4.1` is installed as a dependency.
 Bot versions and releases are independent from the server.
 
-Install the beta in a virtual environment:
+Install the published 0.2.0b1 beta in a virtual environment. For the pending
+0.3.0b1 beta, install the source checkout as described below:
 
 ```bash
 python -m venv .venv

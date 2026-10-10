@@ -6,7 +6,7 @@
 MTProto. It is a separate application in the same distribution as the Telegram
 and WhatsApp bots. It does not inherit bot registration, webhook processing or
 bot conversations. Multiple accounts require separate mounts, state files and
-keys. The base application is included in `0.2.0b1`. This source checkout extends it to
+keys. The base application is included in `0.2.0b1`. The `0.3.0b1` source version extends it to
 37 MCP tools; the additions below are not yet published on PyPI.
 
 Use it for a local developer service: an authenticated MCP client can read a

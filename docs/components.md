@@ -9,7 +9,7 @@ the operation, not by whether the caller uses REST, MCP or Python.
 |---|---|---|---|
 | `TelegramBotApplication` | BotFather bot token; HTTPS webhook for receiving | Exported by the package | [Telegram bot](guides/telegram.md) |
 | `WhatsAppBotApplication` | Business number and Meta Cloud API credentials; HTTPS webhook | Exported by the package | [WhatsApp Business bot](guides/whatsapp.md) |
-| `TelegramAccountApplication` | Personal Telegram session through MTProto; local enrollment | Base in 0.2.0b1; 37-tool expansion in this source branch | [Telegram account](guides/telegram-account.md) |
+| `TelegramAccountApplication` | Personal Telegram session through MTProto; local enrollment | Base in 0.2.0b1; 37-tool expansion in the pending 0.3.0b1 beta | [Telegram account](guides/telegram-account.md) |
 | `examples.whatsapp_account.application.WhatsAppAccountApplication` | Personal WhatsApp linked device through the patched native Tryx library | Source-tree prototype, 76 tools; absent from the wheel | [WhatsApp account](guides/whatsapp-account-prototype.rst) |
 
 `BotBaseApplication` supplies shared bot behavior. Personal account applications
