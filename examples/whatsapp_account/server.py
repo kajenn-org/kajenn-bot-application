@@ -1,0 +1,122 @@
+# Copyright 2025 Softwell S.r.l.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Serve the experimental account MCP endpoint on authenticated loopback HTTP."""
+
+import argparse
+import hmac
+import json
+import re
+from functools import partial
+import os
+from pathlib import Path
+import secrets
+
+import uvicorn
+from genro_routes import route
+from kajenn import AsgiServer, RoutedApplication
+from kajenn.exceptions import HTTPUnauthorized
+from kajenn.response import Response
+
+from examples.whatsapp_account.application import WhatsAppAccountApplication
+from examples.whatsapp_account.connection import _Connection
+from examples.whatsapp_account.transcription import _LocalTranscriber
+
+
+class _Identity(RoutedApplication):
+    def __init__(self, *, token_path, **kwargs):
+        self.token = Path(token_path).read_text().strip()
+        if not self.token:
+            raise ValueError("An authentication token is required")
+        super().__init__(**kwargs)
+
+    @route()
+    def check(self, credential: str = "", channel: str = "") -> dict:
+        if not hmac.compare_digest(credential, f"Bearer {self.token}"):
+            raise HTTPUnauthorized("Invalid account credential")
+        return {"identity": "local-owner", "tags": ["whatsapp_account_read", "whatsapp_account_write",
+                                                   "whatsapp_account_manage", "admin"], "data": {}}
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("kajenn.kbus"):
+            await super().__call__(scope, receive, send)
+        else:
+            await Response("Not Found", status_code=404)(scope, receive, send)
+
+
+class _Server:
+    def __init__(self, arguments):
+        self.arguments = arguments
+
+    def account_mounts(self):
+        config = getattr(self.arguments, "accounts", None)
+        accounts = json.loads(config.read_text()) if config else {"whatsapp": str(self.arguments.session_dir)}
+        if not isinstance(accounts, dict) or not 1 <= len(accounts) <= 20:
+            raise ValueError("accounts must map one to twenty mount names to private session directories")
+        model = getattr(self.arguments, "transcription_model", None)
+        transcriber = _LocalTranscriber(model) if model else None
+        mounts = []
+        used = set()
+        for code, path in accounts.items():
+            if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", code) or code == "identity":
+                raise ValueError("Invalid or reserved account mount name")
+            if not isinstance(path, str) or not Path(path).is_absolute():
+                raise ValueError("Account session directories must be absolute paths")
+            directory = Path(path)
+            if directory.resolve() in used:
+                raise ValueError("Each account requires a separate session directory")
+            used.add(directory.resolve())
+            mounts.append((WhatsAppAccountApplication,
+                           {"code": code, "transcriber": transcriber, "connection_factory": partial(_Connection, directory, self.arguments.resync),
+                            "policy": {"operations": ["*"], "chats": {"*": ["read", "write", "admin"]}}}))
+        return mounts
+
+    def run(self):
+        directory = self.arguments.session_dir
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if directory.is_symlink() or directory.stat().st_mode & 0o077:
+            raise PermissionError("Account directory must be private (0700)")
+        token_path = directory / "mcp.token"
+        if not token_path.exists():
+            descriptor = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w") as token_file:
+                token_file.write(secrets.token_urlsafe(32))
+        if token_path.is_symlink() or token_path.stat().st_mode & 0o077:
+            raise PermissionError("Token must be a private regular file (0600)")
+        os.environ["KAJENN_HOME"] = str(directory / "server")
+        (directory / "site").mkdir(mode=0o700, exist_ok=True)
+        server = AsgiServer(
+            applications=[
+                (_Identity, {"code": "identity", "token_path": str(token_path)}),
+                *self.account_mounts(),
+            ],
+            storage=[{"name": "site", "protocol": "local", "base_path": str(directory / "site")}],
+            channels={name: {"authentication_route": "/identity/check"}
+                      for name in ("rest", "mcp")},
+        )
+        uvicorn.run(server, host="127.0.0.1", port=self.arguments.port, access_log=False)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--session-dir", type=Path, required=True)
+    parser.add_argument("--port", type=int, default=8766)
+    parser.add_argument("--accounts", type=Path, help="JSON mapping mount names to separate session directories; one shared owner")
+    parser.add_argument("--transcription-model", type=Path, help="Local faster-whisper model directory; no model downloads")
+    parser.add_argument("--resync", action="store_true", help="Replay app-state directory metadata")
+    _Server(parser.parse_args()).run()
+
+
+if __name__ == "__main__":
+    main()

@@ -34,6 +34,7 @@ class FakeTelegram:
         self.me = SimpleNamespace(id=7, username="developer", first_name="Developer", bot=False)
         self.messages = [self.message(i) for i in range(5, 0, -1)]
         self.settings = kwargs
+        self.handlers = []
 
     def message(self, code, chat_id=CHAT, out=True):
         return SimpleNamespace(
@@ -45,6 +46,9 @@ class FakeTelegram:
             raw_text=f"Message {code}",
             media=None,
         )
+
+    def add_event_handler(self, callback, builder):
+        self.handlers.append((callback, builder))
 
     async def connect(self):
         self.connected = True
@@ -170,3 +174,8 @@ class FakeTelegram:
                 )
             ]
         )
+
+    async def iter_download(self, media):
+        self.calls.append(("download", media))
+        for chunk in self.download_chunks:
+            yield chunk

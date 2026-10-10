@@ -1,0 +1,29 @@
+--- a/src/events/proto_cache.rs
++++ b/src/events/proto_cache.rs
+@@ -6,6 +6,7 @@
+ static SYNC_ACTION_VALUE_PROTO: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+ static LAZY_CONVERSATION_PROTO: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+ static CONTACT_UPDATE_ACTION_PROTO: PyOnceLock<Py<PyType>> = PyOnceLock::new();
++static ARCHIVE_ACTION_PROTO: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+ static MUTE_ACTION_PROTO: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+ static MARK_CHAT_AS_READ_UPDATE_PROTO: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+ static HISTORY_SYNC_PROTO: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+@@ -90,3 +91,7 @@
+     let proto_type = proto_whatsapp_message(py)?;
+     parse_proto_bytes(py, proto_type, proto_bytes)
+ }
++
++pub fn proto_archive_action(py: Python<'_>) -> PyResult<&'static Py<PyType>> {
++    cached_proto_type(py, &ARCHIVE_ACTION_PROTO, "SyncActionValue.ArchiveChatAction")
++}
+--- a/src/events/types/message_and_updates.rs
++++ b/src/events/types/message_and_updates.rs
+@@ -404,7 +404,7 @@
+         } else {
+             let proto_instance = from_string_to_python_proto(
+                 py,
+-                get_proto_sync_action_value_from_string(py)?,
++                crate::events::proto_cache::proto_archive_action(py)?,
+                 self.action.as_ref().encode_to_vec().as_slice(),
+             )?;
+             self.action_cache.set(proto_instance.clone_ref(py)).ok();

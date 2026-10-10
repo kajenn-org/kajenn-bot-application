@@ -1,0 +1,67 @@
+--- a/src/events/proto_cache.rs
++++ b/src/events/proto_cache.rs
+@@ -16,7 +16,11 @@
+ 
+ fn import_proto_type(py: Python<'_>, attr: &str) -> PyResult<Py<PyType>> {
+     let module = py.import("tryx.waproto.whatsapp_pb2")?;
+-    let message_type = module.getattr(attr)?.cast_into::<PyType>()?;
++    let mut value = module.into_any();
++    for component in attr.split('.') {
++        value = value.getattr(component)?;
++    }
++    let message_type = value.cast_into::<PyType>()?;
+     Ok(message_type.unbind())
+ }
+ 
+@@ -41,15 +45,15 @@
+ }
+ 
+ pub fn proto_contact_action(py: Python<'_>) -> PyResult<&'static Py<PyType>> {
+-    cached_proto_type(py, &CONTACT_UPDATE_ACTION_PROTO, "ContactAction")
++    cached_proto_type(py, &CONTACT_UPDATE_ACTION_PROTO, "SyncActionValue.ContactAction")
+ }
+ 
+ pub fn proto_mute_action(py: Python<'_>) -> PyResult<&'static Py<PyType>> {
+-    cached_proto_type(py, &MUTE_ACTION_PROTO, "MuteAction")
++    cached_proto_type(py, &MUTE_ACTION_PROTO, "SyncActionValue.MuteAction")
+ }
+ 
+ pub fn proto_mark_chat_as_read_action(py: Python<'_>) -> PyResult<&'static Py<PyType>> {
+-    cached_proto_type(py, &MARK_CHAT_AS_READ_UPDATE_PROTO, "MarkChatAsReadAction")
++    cached_proto_type(py, &MARK_CHAT_AS_READ_UPDATE_PROTO, "SyncActionValue.MarkChatAsReadAction")
+ }
+ 
+ pub fn proto_history_sync(py: Python<'_>) -> PyResult<&'static Py<PyType>> {
+@@ -57,11 +61,11 @@
+ }
+ 
+ pub fn proto_delete_chat_action(py: Python<'_>) -> PyResult<&'static Py<PyType>> {
+-    cached_proto_type(py, &DELETE_CHAT_ACTION_PROTO, "DeleteChatAction")
++    cached_proto_type(py, &DELETE_CHAT_ACTION_PROTO, "SyncActionValue.DeleteChatAction")
+ }
+ 
+ pub fn proto_delete_message_for_me_action(py: Python<'_>) -> PyResult<&'static Py<PyType>> {
+-    cached_proto_type(py, &DELETE_MESSAGE_FOR_ME_ACTION_PROTO, "DeleteMessageForMeAction")
++    cached_proto_type(py, &DELETE_MESSAGE_FOR_ME_ACTION_PROTO, "SyncActionValue.DeleteMessageForMeAction")
+ }
+ 
+ pub fn proto_message_key(py: Python<'_>) -> PyResult<&'static Py<PyType>> {
+@@ -69,7 +73,7 @@
+ }
+ 
+ pub fn proto_sync_action_message_range(py: Python<'_>) -> PyResult<&'static Py<PyType>> {
+-    cached_proto_type(py, &SYNC_ACTION_MESSAGE_RANGE_PROTO, "SyncActionMessageRange")
++    cached_proto_type(py, &SYNC_ACTION_MESSAGE_RANGE_PROTO, "SyncActionValue.SyncActionMessageRange")
+ }
+ 
+ pub fn parse_proto_bytes(
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "tryx"
+-version = "1.5.0+kajenn.2"
++version = "1.5.0+kajenn.3"
+ edition = "2024"
+ 
+ # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
