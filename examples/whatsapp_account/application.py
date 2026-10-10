@@ -19,23 +19,27 @@ import base64
 import binascii
 import copy
 import inspect
+import time
 from contextvars import ContextVar
 
 from kajenn.applications.mcp import McpOpenApiApplication
 from kajenn.exceptions import HTTPBadRequest, HTTPException, HTTPForbidden
 from kajenn.lifespan import FatalBootError
 
+from examples.whatsapp_account.outbox import _Outbox
+from examples.whatsapp_account.commands import _ExtendedCommands
 from examples.whatsapp_account.policy import _Policy, JID_PATTERN
 from examples.whatsapp_account.routes import _Operations
 
 MEDIA_LIMIT = 5 * 1024 * 1024
 
 
-class WhatsAppAccountApplication(McpOpenApiApplication):
+class WhatsAppAccountApplication(_ExtendedCommands, McpOpenApiApplication):
     def __init__(self, *, connection_factory, policy=None, **kwargs):
         self.connection = connection_factory()
         self.initial_policy = policy
         self.access = None
+        self.outbox = None
         self.lock = asyncio.Lock()
         self.scope_context = ContextVar("whatsapp_account_scope", default=None)
         kwargs.setdefault("mcp_name_segment", "_mcp")
@@ -63,11 +67,14 @@ class WhatsAppAccountApplication(McpOpenApiApplication):
         try:
             await self.connection.start()
             self.access = _Policy(self.connection.directory, self.initial_policy)
+            self.outbox = _Outbox(self)
         except Exception as error:
             await self.connection.stop()
             raise FatalBootError("WhatsApp account startup failed") from error
 
     async def on_shutdown(self):
+        if self.outbox is not None:
+            await self.outbox.stop()
         async with self.lock:
             await self.connection.stop()
 
@@ -126,6 +133,8 @@ class WhatsAppAccountApplication(McpOpenApiApplication):
     def validate_peer(self, chat_id, known=True):
         if not isinstance(chat_id, str) or not JID_PATTERN.fullmatch(chat_id):
             raise HTTPBadRequest("chat_id must be an exact WhatsApp JID")
+        if known and chat_id.endswith("@newsletter"):
+            raise HTTPBadRequest("Use the dedicated channel commands for newsletters")
         if known and not self.connection.directory.known_peer(chat_id):
             raise HTTPBadRequest("chat_id must be returned by contacts or chats")
 
@@ -207,12 +216,12 @@ class WhatsAppAccountApplication(McpOpenApiApplication):
 
     async def send_media(self, chat_id, kind, content_base64, mimetype, filename="", caption=""):
         self.validate_peer(chat_id)
-        if kind not in ("image", "document", "audio"):
-            raise HTTPBadRequest("kind must be image, document or audio")
+        if kind not in ("image", "document", "audio", "voice", "video", "gif", "sticker"):
+            raise HTTPBadRequest("Unsupported media kind")
         self.validate_text(mimetype, 100)
         self.validate_text(filename, 255, empty=True)
         self.validate_text(caption, 1024, empty=True)
-        if kind == "audio" and caption:
+        if kind in ("audio", "voice", "sticker") and caption:
             raise HTTPBadRequest("audio captions are not supported")
         if any(c in filename for c in ("/", "\\", "\x00")):
             raise HTTPBadRequest("filename must be a display name, not a path")
@@ -264,7 +273,7 @@ class WhatsAppAccountApplication(McpOpenApiApplication):
             raise HTTPBadRequest("participants must contain between 1 and 100 exact JIDs")
         for jid in participants:
             self.validate_peer(jid, known=False)
-            if jid.endswith("@g.us"):
+            if not jid.endswith(("@s.whatsapp.net", "@lid")):
                 raise HTTPBadRequest("participants must be individual JIDs")
         if len(set(participants)) != len(participants):
             raise HTTPBadRequest("participants must be distinct")
@@ -331,3 +340,30 @@ class WhatsAppAccountApplication(McpOpenApiApplication):
 
     async def unsubscribe_events(self, identifier):
         await self.connection.events.unsubscribe_events(identifier)
+
+    async def schedule_message(self, chat_id, text, due, approval_required=True):
+        self.validate_peer(chat_id)
+        self.validate_text(text)
+        if type(due) is not int or not time.time() <= due <= time.time() + 366 * 86400:
+            raise HTTPBadRequest("due must be a future Unix timestamp within one year")
+        if type(approval_required) is not bool:
+            raise HTTPBadRequest("approval_required must be boolean")
+        return await self.run_operation("schedule_message", chat_id, self.outbox.enqueue,
+                                        chat_id, text, due, approval_required)
+
+    async def get_outbox(self, limit=50, offset=0):
+        self.validate_page("", limit, offset)
+        return await self.run_operation("get_outbox", None, self.outbox.list_jobs, limit, offset)
+
+    async def decide_message(self, job_id, decision):
+        self.validate_text(job_id, 64)
+        if decision not in ("approve", "reject", "cancel"):
+            raise HTTPBadRequest("decision must be approve, reject or cancel")
+        return await self.run_operation("decide_message", None, self.outbox.decide, job_id, decision)
+
+    async def get_events(self, after_id=0, limit=50):
+        self.validate_page("", limit, 0)
+        if type(after_id) is not int or not 0 <= after_id <= 9223372036854775807:
+            raise HTTPBadRequest("after_id must be a nonnegative bounded cursor")
+        return await self.run_operation("get_events", None, self.connection.directory.get_events,
+                                        after_id, limit)

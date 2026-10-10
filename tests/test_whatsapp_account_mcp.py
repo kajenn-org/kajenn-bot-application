@@ -15,6 +15,8 @@
 """Contract: authenticated MCP directory access and exact-recipient sending."""
 
 import asyncio
+import time
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -24,6 +26,7 @@ from kajenn.exceptions import HTTPBadRequest, HTTPUnauthorized, HTTPForbidden
 
 from examples.whatsapp_account.application import WhatsAppAccountApplication
 from examples.whatsapp_account.directory import _Directory
+from examples.whatsapp_account.outbox import _Outbox
 from tests.storage_support import site_mounts
 
 
@@ -96,12 +99,43 @@ async def test_mcp_discovery_filters_avatar_and_hides_pairing(account):
     app, connection, http = account
     calls = Calls(http)
     names = {t["name"] for t in (await calls.tools("owner")).json()["result"]["tools"]}
-    assert names == {"get_status", "get_sync_status", "get_contacts", "get_chats", "get_chat",
+    assert names == {"decide_group_requests", "link_community_groups", "get_community_groups", "get_channels", "vote_poll", "respond_group_event", "get_poll_results", "get_events", "schedule_message", "get_outbox", "decide_message", "revoke_message", "delete_message", "get_channel_messages", "react_channel_message", "create_poll", "create_group_event", "create_community", "deactivate_community", "get_group_requests", "get_status", "get_sync_status", "get_contacts", "get_chats", "get_chat",
                      "get_messages", "get_message_status", "get_unread", "search_messages",
                      "send_text", "reply_message", "react_message", "send_media", "download_media",
                      "mark_read", "archive_chat", "mute_chat", "get_group", "get_group_members",
                      "create_group", "update_group_members", "request_history", "get_policy",
-                     "set_policy", "get_audit_log"}
+                     "set_policy", "get_audit_log",
+                     "pin_chat",
+                     "star_message",
+                     "edit_message",
+                     "save_contact",
+                     "get_profile_picture",
+                     "block_contact",
+                     "set_presence",
+                     "send_chat_state",
+                     "set_profile_name",
+                     "set_profile_about",
+                     "get_privacy",
+                     "set_privacy",
+                     "set_disappearing_default",
+                     "set_group_title",
+                     "set_group_description",
+                     "leave_group",
+                     "get_group_invite",
+                     "set_group_setting",
+                     "set_group_disappearing",
+                     "set_group_approval",
+                     "set_group_member_add",
+                     "create_label",
+                     "delete_label",
+                     "set_chat_label",
+                     "create_channel",
+                     "get_channel",
+                     "follow_channel",
+                     "update_channel",
+                     "send_channel_text",
+                     "mute_channel",
+                     }
     assert (await calls.tools("reader")).json()["result"]["tools"] == []
     response = await calls.call("get_contacts", token="reader")
     assert "error" in response.json() or response.json().get("result", {}).get("isError")
@@ -250,3 +284,120 @@ async def test_rest_uses_the_same_avatar_and_policy_rules(account):
                                json={"chat_id": "11@s.whatsapp.net", "text": "no"})
     assert response.status_code == 403
     assert connection.sent == []
+
+
+@pytest.mark.parametrize("operation,arguments", [
+    ("pin_chat", {"chat_id": "11@s.whatsapp.net", "pinned": 1}),
+    ("set_presence", {"available": "yes"}),
+    ("set_privacy", {"category": "Other", "value": "All"}),
+    ("set_disappearing_default", {"seconds": True}),
+    ("create_poll", {"chat_id": "11@s.whatsapp.net", "title": "Q", "options": ["a", "a"]}),
+    ("create_poll", {"chat_id": "11@s.whatsapp.net", "title": "Q", "options": ["a", 3]}),
+    ("create_poll", {"chat_id": "11@s.whatsapp.net", "title": "Q", "options": ["a", "b"], "selectable_count": 3}),
+    ("create_group_event", {"chat_id": "123@g.us", "title": "Event", "start_time": 50, "end_time": 40}),
+    ("get_channel", {"chat_id": "11@s.whatsapp.net"}),
+    ("block_contact", {"chat_id": "123@g.us"}),
+    ("create_label", {"label_id": "a", "name": "Label", "color": 20}),
+])
+async def test_extended_validation_never_calls_provider(account, operation, arguments):
+    app, connection, http = account
+    provider = AsyncMock()
+    setattr(connection, operation, provider)
+    with pytest.raises(HTTPBadRequest):
+        await getattr(app, operation)(**arguments)
+    provider.assert_not_awaited()
+
+
+async def test_extended_mcp_role_and_alias_policy(account):
+    app, connection, http = account
+    connection.pin_chat = AsyncMock(return_value={"status": "returned"})
+    calls = Calls(http)
+    denied = await calls.call("pin_chat", {"chat_id": "11@s.whatsapp.net"}, token="readonly")
+    assert denied.json().get("error") or denied.json().get("result", {}).get("isError")
+    connection.pin_chat.assert_not_awaited()
+    connection.directory.add_alias("11@s.whatsapp.net", "99@lid")
+    await app.set_policy({"operations": ["*"], "chats": {"*": ["read", "write"], "99@lid": []}})
+    with pytest.raises(HTTPForbidden):
+        await app.pin_chat("11@s.whatsapp.net")
+    connection.pin_chat.assert_not_awaited()
+
+
+async def test_outbox_approval_is_first_wins_and_policy_rechecked(account):
+    app, connection, http = account
+    job = await app.schedule_message("11@s.whatsapp.net", "Queued", int(time.time()) + 3600)
+    assert job["state"] == "pending"
+    decision = await app.decide_message(job["id"], "approve")
+    assert decision["state"] == "scheduled"
+    assert (await app.decide_message(job["id"], "reject"))["state"] == "scheduled"
+    await app.set_policy({"operations": ["get_outbox"], "chats": {"*": ["read", "write"]}})
+    await app.outbox.dispatch(job["id"])
+    assert not connection.sent
+    assert (await app.get_outbox())["items"][0]["state"] == "blocked"
+
+
+async def test_outbox_provider_failure_is_never_retried(account):
+    app, connection, http = account
+    connection.send_text = AsyncMock(side_effect=ConnectionError("private provider detail"))
+    job = await app.schedule_message("11@s.whatsapp.net", "Queued", int(time.time()) + 3600, False)
+    await app.outbox.dispatch(job["id"])
+    await app.outbox.dispatch(job["id"])
+    connection.send_text.assert_awaited_once()
+    row = (await app.get_outbox())["items"][0]
+    assert row["state"] == "unconfirmed"
+    assert row["error"] == "provider_failure"
+
+
+async def test_outbox_success_and_cancellation(account):
+    app, connection, http = account
+    job = await app.schedule_message("11@s.whatsapp.net", "Queued", int(time.time()) + 3600, False)
+    await app.outbox.dispatch(job["id"])
+    assert connection.sent == [("11@s.whatsapp.net", "Queued")]
+    assert (await app.get_outbox())["items"][0]["message_id"] == "sent-id"
+    cancelled = await app.schedule_message("11@s.whatsapp.net", "Cancelled", int(time.time()) + 3601)
+    await app.decide_message(cancelled["id"], "cancel")
+    await app.outbox.dispatch(cancelled["id"])
+    assert len(connection.sent) == 1
+
+
+async def test_event_journal_filters_before_pagination_and_redacts(account):
+    app, connection, http = account
+    store = connection.directory
+    store.add_event("message", {"chat_id": "22@s.whatsapp.net", "message_id": "hidden"})
+    store.add_event("message", {"chat_id": "11@s.whatsapp.net", "message_id": "visible", "text": "secret"})
+    await app.set_policy({"operations": ["get_events"], "chats": {"11@s.whatsapp.net": ["read"]}})
+    page = await app.get_events(0, 1)
+    assert page["items"][0]["message_id"] == "visible"
+    assert "secret" not in str(page)
+    assert (await app.get_events(page["next_cursor"]))["items"] == []
+
+
+async def test_outbox_recovery_never_replays_inflight_message(account):
+    app, connection, http = account
+    job = await app.schedule_message("11@s.whatsapp.net", "Queued", int(time.time()) + 3600, False)
+    await app.outbox.stop()
+    app.outbox.finish(job["id"], "sending")
+    app.outbox = _Outbox(app)
+    await asyncio.sleep(0)
+    assert (await app.get_outbox())["items"][0]["state"] == "unconfirmed"
+    assert connection.sent == []
+
+
+async def test_community_link_checks_every_group_and_filters_pages(account):
+    app, connection, http = account
+    connection.link_community_groups = AsyncMock()
+    connection.get_community_groups = AsyncMock(return_value=[{"id": "2@g.us"}, {"id": "3@g.us"}])
+    await app.set_policy({"operations": ["*"], "chats": {"1@g.us": ["read", "admin"], "3@g.us": ["read"]}})
+    with pytest.raises(HTTPForbidden):
+        await app.link_community_groups("1@g.us", ["2@g.us"])
+    connection.link_community_groups.assert_not_awaited()
+    page = await app.get_community_groups("1@g.us", limit=1)
+    assert page["items"] == [{"id": "3@g.us"}]
+
+
+async def test_newsletter_is_not_a_group_participant_or_text_chat(account):
+    app, connection, http = account
+    connection.directory.add_chat("1@newsletter")
+    with pytest.raises(HTTPBadRequest):
+        app.validate_participants(["1@newsletter"])
+    with pytest.raises(HTTPBadRequest):
+        await app.send_text("1@newsletter", "Wrong transport")

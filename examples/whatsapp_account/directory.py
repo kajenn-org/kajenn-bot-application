@@ -57,6 +57,8 @@ class _Directory:
             CREATE TABLE IF NOT EXISTS chat_state (
                 id TEXT PRIMARY KEY, unread INTEGER, muted INTEGER);
             CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS event_journal (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT, timestamp REAL, kind TEXT, chat_id TEXT, data TEXT);
             CREATE TABLE IF NOT EXISTS audit (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, timestamp REAL, actor TEXT,
                 operation TEXT, chat_id TEXT, outcome TEXT);
@@ -107,6 +109,11 @@ class _Directory:
 
     def add_message(self, chat_id, message_id, sender, text, timestamp, from_me):
         if not chat_id or not message_id:
+            return
+        deleted = self.database.execute(
+            "SELECT 1 FROM message_data WHERE chat_id=? AND id=? AND status='deleted'",
+            (chat_id, message_id)).fetchone()
+        if deleted:
             return
         self.add_chat(chat_id, source="message", timestamp=timestamp)
         with self.database:
@@ -250,6 +257,10 @@ class _Directory:
         return dict(rows[0]) if rows else None
 
     def set_message_data(self, chat_id, message_id, proto=None, kind="text", status="received"):
+        if self.database.execute(
+                "SELECT 1 FROM message_data WHERE chat_id=? AND id=? AND status='deleted'",
+                (chat_id, message_id)).fetchone():
+            return
         with self.database:
             self.database.execute("""
                 INSERT INTO message_data VALUES(?,?,?,?,?) ON CONFLICT(chat_id,id) DO UPDATE SET
@@ -273,3 +284,24 @@ class _Directory:
                 "submission": message["status"] if message else None,
                 "receipts": [dict(row) for row in rows],
                 "coverage": "observed_receipts_not_all_group_members"}
+
+    def add_event(self, kind, data):
+        # Only stable identifiers are retained; never message bodies or credentials.
+        selected = {key: data[key] for key in ("chat_id", "message_id", "status") if key in data}
+        with self.database:
+            self.database.execute(
+                "INSERT INTO event_journal(timestamp,kind,chat_id,data) VALUES(?,?,?,?)",
+                (time.time(), kind, selected.get("chat_id"), json.dumps(selected)))
+            self.database.execute(
+                "DELETE FROM event_journal WHERE seq <= (SELECT MAX(seq)-10000 FROM event_journal)")
+
+    def get_events(self, after_id, limit):
+        first = self.database.execute("SELECT MIN(seq) FROM event_journal").fetchone()[0]
+        rows = self.database.execute(
+            "SELECT * FROM event_journal WHERE seq>? AND (chat_id IS NULL OR readable(chat_id)) "
+            "ORDER BY seq LIMIT ?", (after_id, limit + 1)).fetchall()
+        return {"items": [{"id": row["seq"], "timestamp": row["timestamp"], "kind": row["kind"],
+                           **json.loads(row["data"])} for row in rows[:limit]],
+                "next_cursor": rows[min(limit, len(rows))-1]["seq"] if rows else after_id,
+                "has_more": len(rows) > limit,
+                "retention_gap": bool(after_id and first and after_id < first - 1)}

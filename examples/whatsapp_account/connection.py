@@ -36,12 +36,13 @@ from tryx.waproto.whatsapp_pb2 import Message
 
 from kajenn.exceptions import HTTPBadRequest, HTTPException
 
+from examples.whatsapp_account.provider_commands import _ProviderCommands
 from examples.whatsapp_account.directory import _Directory
 from examples.whatsapp_account.session import _Session
 from examples.whatsapp_account.events import _Events
 
 
-class _Connection:
+class _Connection(_ProviderCommands):
     def __init__(self, directory, resync=False):
         self.path = directory
         self.directory = None
@@ -57,6 +58,7 @@ class _Connection:
 
     def create_runtime(self, database):
         self.directory = _Directory(self.path / "directory.db")
+        self.events.journal = self.directory.add_event
         runtime = Tryx(SqliteStore(str(database), 0))
         for method in ("resync_directory", "fetch_message_history"):
             if not callable(getattr(runtime.get_client().advanced, method, None)):
@@ -188,7 +190,9 @@ class _Connection:
     def message_kind(self, body):
         for field, kind in (("imageMessage", "image"), ("documentMessage", "document"),
                             ("audioMessage", "audio"), ("videoMessage", "video"),
-                            ("stickerMessage", "sticker")):
+                            ("stickerMessage", "sticker"), ("pollCreationMessage", "poll"),
+                            ("pollCreationMessageV2", "poll"), ("pollCreationMessageV3", "poll"),
+                            ("pollUpdateMessage", "poll_vote"), ("eventMessage", "event")):
             if body.HasField(field):
                 return kind
         return "text" if body.conversation or body.extendedTextMessage.text else "other"
@@ -303,8 +307,14 @@ class _Connection:
         elif kind == "document":
             result = await client.send_document(self.jid(chat_id), content, mimetype=mimetype,
                                                 file_name=filename or "attachment", caption=caption)
+        elif kind in ("video", "gif"):
+            result = await client.send_video(self.jid(chat_id), content, mimetype=mimetype,
+                                             caption=caption, gif_playback=kind == "gif")
+        elif kind == "sticker":
+            result = await client.send_sticker(self.jid(chat_id), content)
         else:
-            result = await client.send_audio(self.jid(chat_id), content, mimetype=mimetype)
+            result = await client.send_audio(self.jid(chat_id), content, mimetype=mimetype,
+                                             ptt=kind == "voice")
         return self.record_sent(result, chat_id, caption or None, kind=kind)
 
     async def download_media(self, chat_id, message_id, limit):

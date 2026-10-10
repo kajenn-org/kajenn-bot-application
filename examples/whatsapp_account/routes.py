@@ -21,10 +21,12 @@ contains operation metadata, never message content or credentials. No provider
 mutation is retried automatically after an uncertain result.
 """
 
-from genro_routes import RoutingClass, route
+from genro_routes import route
+
+from examples.whatsapp_account.extended_routes import _ExtendedRoutes
 
 
-class _Operations(RoutingClass):
+class _Operations(_ExtendedRoutes):
     def __init__(self, application):
         self.application = application
         self.route.plug("channel")
@@ -153,3 +155,23 @@ class _Operations(RoutingClass):
     async def get_audit_log(self, limit: int = 50, offset: int = 0) -> dict:
         """Read operation metadata without message text or credentials."""
         return await self.application.get_audit_log(limit, offset)
+
+    @route(channel_channels="mcp,rest", auth_rule="whatsapp_account_write", openapi_method="post")
+    async def schedule_message(self, chat_id: str, text: str, due: int, approval_required: bool = True) -> dict:
+        """Queue a text for a Unix timestamp; approval is required by default."""
+        return await self.application.schedule_message(chat_id, text, due, approval_required)
+
+    @route(channel_channels="mcp,rest", auth_rule="whatsapp_account_read", openapi_method="post")
+    async def get_outbox(self, limit: int = 50, offset: int = 0) -> dict:
+        """Read permitted queued texts and dispatch outcomes."""
+        return await self.application.get_outbox(limit, offset)
+
+    @route(channel_channels="mcp,rest", auth_rule="admin", openapi_method="post")
+    async def decide_message(self, job_id: str, decision: str) -> dict:
+        """Approve, reject or cancel a queued text; the first applicable decision wins."""
+        return await self.application.decide_message(job_id, decision)
+
+    @route(channel_channels="mcp,rest", auth_rule="whatsapp_account_read", openapi_method="post")
+    async def get_events(self, after_id: int = 0, limit: int = 50) -> dict:
+        """Replay permitted event identifiers from the bounded persistent journal."""
+        return await self.application.get_events(after_id, limit)

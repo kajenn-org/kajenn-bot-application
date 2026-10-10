@@ -27,6 +27,7 @@ import uuid
 class _Events:
     def __init__(self):
         self.listeners = {}
+        self.journal = None
         self.dropped = 0
         self.failed = 0
 
@@ -43,6 +44,8 @@ class _Events:
         await asyncio.gather(task, return_exceptions=True)
 
     def emit(self, kind, **data):
+        if self.journal is not None:
+            self.journal(kind, data)
         for queue, task, kinds in self.listeners.values():
             if kinds is not None and kind not in kinds:
                 continue

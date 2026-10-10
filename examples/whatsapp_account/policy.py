@@ -26,6 +26,21 @@ from kajenn.exceptions import HTTPBadRequest, HTTPForbidden
 
 
 OPERATIONS = {
+    "decide_group_requests": "admin", "link_community_groups": "admin",
+    "get_community_groups": "read", "get_channels": None,
+    "vote_poll": "write", "respond_group_event": "write", "get_poll_results": "read",
+    "get_events": None,
+    "schedule_message": "write", "get_outbox": None, "decide_message": None,
+    "revoke_message": 'write',
+    "delete_message": 'write',
+    "get_channel_messages": 'read',
+    "react_channel_message": 'write',
+    "create_poll": 'write',
+    "create_group_event": 'write',
+    "create_community": None,
+    "deactivate_community": 'admin',
+    "get_group_requests": 'admin',
+
     "get_status": None, "get_sync_status": None, "get_contacts": None,
     "get_chats": None, "get_chat": "read", "get_unread": None,
     "get_messages": "read", "search_messages": "read", "get_message_status": "read",
@@ -34,8 +49,39 @@ OPERATIONS = {
     "archive_chat": "write", "mute_chat": "write", "request_history": "read",
     "get_group": "read", "get_group_members": "read", "create_group": None,
     "update_group_members": "admin",
+    "pin_chat": 'write',
+    "star_message": 'write',
+    "edit_message": 'write',
+    "save_contact": 'admin',
+    "get_profile_picture": 'read',
+    "block_contact": 'admin',
+    "set_presence": None,
+    "send_chat_state": 'write',
+    "set_profile_name": None,
+    "set_profile_about": None,
+    "get_privacy": None,
+    "set_privacy": None,
+    "set_disappearing_default": None,
+    "set_group_title": 'admin',
+    "set_group_description": 'admin',
+    "leave_group": 'admin',
+    "get_group_invite": 'admin',
+    "set_group_setting": 'admin',
+    "set_group_disappearing": 'admin',
+    "set_group_approval": 'admin',
+    "set_group_member_add": 'admin',
+    "create_label": None,
+    "delete_label": None,
+    "set_chat_label": 'write',
+    "create_channel": None,
+    "get_channel": 'read',
+    "follow_channel": 'admin',
+    "update_channel": 'admin',
+    "send_channel_text": 'write',
+    "mute_channel": 'write',
+
 }
-JID_PATTERN = re.compile(r"[0-9]+(?:-[0-9]+)?@(?:s\.whatsapp\.net|lid|g\.us)\Z")
+JID_PATTERN = re.compile(r"[0-9]+(?:-[0-9]+)?@(?:s\.whatsapp\.net|lid|g\.us|newsletter)\Z")
 
 
 class _Policy:

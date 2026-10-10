@@ -16,11 +16,15 @@
 
 import asyncio
 import base64
+import hashlib
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from tryx.backend import SqliteStore
 from tryx.client import Tryx, ChatActionsClient
 from tryx.types import JID
@@ -31,6 +35,7 @@ from kajenn.exceptions import HTTPBadRequest, HTTPException
 
 from examples.whatsapp_account.connection import _Connection
 from examples.whatsapp_account.directory import _Directory
+from examples.whatsapp_account.server import _Server
 
 
 class TestNativeLifecycle:
@@ -125,7 +130,8 @@ async def native_connection(tmp_path):
         send_document=AsyncMock(return_value=SimpleNamespace(message_id="doc-id")),
         send_audio=AsyncMock(return_value=SimpleNamespace(message_id="audio-id")),
         download_media=AsyncMock(return_value=b"file"),
-        advanced=SimpleNamespace(fetch_message_history=AsyncMock(return_value="history-request")),
+        advanced=SimpleNamespace(fetch_message_history=AsyncMock(return_value="history-request"),
+                                 get_pn=lambda: JID("1", "s.whatsapp.net"), get_lid=lambda: JID("2", "lid")),
         chat_actions=SimpleNamespace(
             react_message=AsyncMock(return_value="reaction-id"),
             build_message_key=ChatActionsClient.build_message_key,
@@ -252,3 +258,135 @@ async def test_legacy_probe_ids_are_not_sent_back_to_the_provider(native_connect
         await conn.react_message("1@s.whatsapp.net", invalid_id, "👍")
     assert error.value.status == 409
     conn.session.client.chat_actions.react_message.assert_not_awaited()
+
+
+async def test_extended_native_commands_and_deleted_history(native_connection):
+    conn = native_connection
+    client = conn.session.client
+    client.chat_actions.edit_message = AsyncMock(return_value="edit-id")
+    client.chat_actions.revoke_message = AsyncMock()
+    client.chat_actions.pin_chat = AsyncMock()
+    client.groups = SimpleNamespace(get_metadata=AsyncMock(return_value=SimpleNamespace(
+        description="old text", description_id="revision-id")), set_description=AsyncMock())
+    await conn.set_group_description("123@g.us", "New text")
+    assert client.groups.set_description.call_args.args[2] == "revision-id"
+    conn.directory.add_message("1@s.whatsapp.net", "mine", "self", "Before", 1, True)
+    await conn.edit_message("1@s.whatsapp.net", "mine", "After")
+    assert client.chat_actions.edit_message.call_args.args[2].conversation == "After"
+    await conn.revoke_message("1@s.whatsapp.net", "mine")
+    conn.directory.add_message("1@s.whatsapp.net", "mine", "self", "Replay", 1, True)
+    conn.directory.set_message_data("1@s.whatsapp.net", "mine", Message(conversation="Replay").SerializeToString())
+    row = conn.directory.get_message("1@s.whatsapp.net", "mine")
+    assert row["text"] == "" and row["proto"] is None and row["status"] == "deleted"
+
+
+async def test_poll_and_event_secrets_are_persisted_but_not_returned(native_connection):
+    conn = native_connection
+    conn.session.client.polls = SimpleNamespace(create=AsyncMock(return_value=("poll-id", list(b"secret"))))
+    conn.session.client.events = SimpleNamespace(create=AsyncMock(return_value={
+        "message_id": "event-id", "message_secret": list(b"event-secret")}))
+    poll = await conn.create_poll("123@g.us", "Question", ["Yes", "No"], 1)
+    event = await conn.create_group_event("123@g.us", "Meeting", 100, 200)
+    assert "secret" not in str(poll) + str(event)
+    assert conn.directory.get_setting("poll:123@g.us:poll-id")["secret"] == b"secret".hex()
+    assert conn.directory.get_setting("event:123@g.us:event-id")["secret"] == b"event-secret".hex()
+
+
+@pytest.mark.parametrize("kind,method", [("video", "send_video"), ("gif", "send_video"),
+                                        ("sticker", "send_sticker"), ("voice", "send_audio")])
+async def test_extended_media_modes(native_connection, kind, method):
+    conn = native_connection
+    transport = AsyncMock(return_value=SimpleNamespace(message_id="media-id"))
+    setattr(conn.session.client, method, transport)
+    await conn.send_media("1@s.whatsapp.net", kind, b"data", "test/type", "", "")
+    assert transport.call_args.args[1] == b"data"
+    if kind == "voice":
+        assert transport.call_args.kwargs["ptt"] is True
+    if kind == "gif":
+        assert transport.call_args.kwargs["gif_playback"] is True
+
+
+async def test_channel_uses_newsletter_transport_and_exact_jid(native_connection):
+    conn = native_connection
+    conn.session.client.newsletter = SimpleNamespace(send_message=AsyncMock(return_value="channel-id"))
+    result = await conn.send_channel_text("123@newsletter", "Update")
+    args = conn.session.client.newsletter.send_message.call_args.args
+    assert conn.peer_id(args[0]) == "123@newsletter" and args[1].conversation == "Update"
+    assert result["id"] == "channel-id"
+
+
+async def test_retained_poll_vote_and_event_response(native_connection):
+    conn = native_connection
+    conn.session.client.polls = SimpleNamespace(vote=AsyncMock(return_value="vote-id"))
+    conn.session.client.events = SimpleNamespace(respond=AsyncMock(return_value="response-id"))
+    body = Message()
+    body.pollCreationMessage.name = "Question"
+    body.pollCreationMessage.options.add(optionName="Yes")
+    body.pollCreationMessage.options.add(optionName="No")
+    body.pollCreationMessage.selectableOptionsCount = 1
+    body.messageContextInfo.messageSecret = b"x" * 32
+    conn.directory.add_message("123@g.us", "poll", "3@lid", None, 1, False)
+    conn.directory.set_message_data("123@g.us", "poll", body.SerializeToString(), "poll")
+    await conn.vote_poll("123@g.us", "poll", ["Yes"])
+    args = conn.session.client.polls.vote.call_args.args
+    assert args[3] == b"x" * 32 and conn.peer_id(args[2]) == "3@lid"
+    with pytest.raises(HTTPBadRequest):
+        await conn.vote_poll("123@g.us", "poll", ["Unknown"])
+    assert conn.session.client.polls.vote.await_count == 1
+    update = Message()
+    update.pollUpdateMessage.pollCreationMessageKey.id = "poll"
+    update.pollUpdateMessage.vote.encPayload = b"invalid"
+    update.pollUpdateMessage.vote.encIv = b"invalid"
+    conn.directory.add_message("123@g.us", "vote", "4@lid", None, 2, False)
+    conn.directory.set_message_data("123@g.us", "vote", update.SerializeToString(), "poll_vote")
+    result = await conn.get_poll_results("123@g.us", "poll")
+    assert result["undecryptable_updates"] == 1
+    assert result["coverage"] == "observed_votes_only"
+    event = Message()
+    event.eventMessage.name = "Meeting"
+    event.messageContextInfo.messageSecret = b"y" * 32
+    conn.directory.add_message("123@g.us", "event", "3@lid", None, 1, False)
+    conn.directory.set_message_data("123@g.us", "event", event.SerializeToString(), "event")
+    await conn.respond_group_event("123@g.us", "event", "Going")
+    assert conn.session.client.events.respond.call_args.args[3] == b"y" * 32
+
+
+def test_multiaccount_mounts_keep_directories_distinct(tmp_path):
+    config = tmp_path / "accounts.json"
+    first, second = tmp_path / "first", tmp_path / "second"
+    config.write_text('{"first": "' + str(first) + '", "second": "' + str(second) + '"}')
+    server = _Server(SimpleNamespace(accounts=config, session_dir=tmp_path, resync=False))
+    mounts = server.account_mounts()
+    assert [options["code"] for _, options in mounts] == ["first", "second"]
+    assert mounts[0][1]["connection_factory"]().path == first
+    assert mounts[1][1]["connection_factory"]().path == second
+    config.write_text('{"first": "' + str(first) + '", "second": "' + str(first) + '"}')
+    with pytest.raises(ValueError, match="separate"):
+        server.account_mounts()
+
+
+async def test_poll_results_decrypt_aliases_and_use_latest_vote(native_connection):
+    conn = native_connection
+    secret = b"x" * 32
+    conn.directory.set_setting("poll:123@g.us:poll", {
+        "creator": "3@lid", "secret": secret.hex(), "options": ["Yes", "No"], "selectable_count": 1})
+    conn.directory.add_alias("33@s.whatsapp.net", "3@lid")
+    conn.directory.add_alias("44@s.whatsapp.net", "4@lid")
+    for timestamp, option in ((1, "Yes"), (2, "No")):
+        key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
+                   info=b"poll33@s.whatsapp.net44@s.whatsapp.netPoll Vote").derive(secret)
+        nonce = bytes([timestamp]) * 12
+        payload = Message.PollVoteMessage(selectedOptions=[hashlib.sha256(option.encode()).digest()])
+        encrypted = AESGCM(key).encrypt(nonce, payload.SerializeToString(), b"poll\x0044@s.whatsapp.net")
+        message = Message()
+        vote = message.pollUpdateMessage
+        vote.pollCreationMessageKey.id = "poll"
+        vote.senderTimestampMs = timestamp * 1000
+        vote.vote.encPayload = encrypted
+        vote.vote.encIv = nonce
+        conn.directory.add_message("123@g.us", str(timestamp), "4@lid", None, timestamp, False)
+        conn.directory.set_message_data("123@g.us", str(timestamp), message.SerializeToString(), "poll_vote")
+    result = await conn.get_poll_results("123@g.us", "poll")
+    assert result["undecryptable_updates"] == 0
+    assert result["items"] == [{"option": "Yes", "voters": []},
+                              {"option": "No", "voters": ["44@s.whatsapp.net"]}]

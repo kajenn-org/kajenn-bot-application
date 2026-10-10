@@ -1,7 +1,7 @@
 WhatsApp account prototype
 ==========================
 
-Version: 0.3 — Last updated: 2026-10-10 — Status: UNDER REVIEW
+Version: 0.4 — Last updated: 2026-10-10 — Status: UNDER REVIEW
 
 This source-tree prototype evaluates a personal WhatsApp linked device using
 Tryx and whatsapp-rust. It includes a source-tree ``WhatsAppAccountApplication`` and a local test
@@ -119,7 +119,7 @@ Commands and roles
 Kajenn filters MCP discovery and execution by avatar roles. All commands are also
 available on the application's REST routing surface. The application additionally
 checks its persistent operation and chat policy on execution, including calls
-from trusted Python code. There are 25 MCP tools:
+from trusted Python code. There are 75 MCP tools. The original command families are:
 
 .. list-table:: Account commands
    :header-rows: 1
@@ -271,8 +271,365 @@ harness counts history batches without retaining their contents: restarting the
 server cannot guarantee that those old messages will be resent. New history
 batches and live text messages are retained while the server runs. There is no
 claim of access to every old message or every chat visible on another device.
-Pagination bounds query size, not database retention; automatic retention is a
-future integration concern.
+Pagination bounds query size, not database retention. The event journal retains
+10,000 entries per account; message, audit and outbox retention need a deployment
+policy. Outgoing message deletion records a local tombstone, preventing subsequent
+history replay from restoring the deleted body.
+
+Expanded command reference
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+All commands below use the same avatar filtering, account operation policy,
+chat grants, serialized execution and content-free audit as the original tools.
+No command accepts an arbitrary SDK method name. Newsletter JIDs use the
+``@newsletter`` server and require the dedicated channel commands; they cannot
+be used as group participants or ordinary text-chat targets.
+
+.. list-table:: Complete command inventory
+   :header-rows: 1
+   :widths: 25 20 55
+
+   * - Tool
+     - Avatar role
+     - Contract
+   * - ``archive_chat``
+     - ``whatsapp_account_write``
+     - Archive or unarchive a chat on WhatsApp.
+   * - ``block_contact``
+     - ``whatsapp_account_manage``
+     - Block or unblock an exact contact.
+   * - ``create_channel``
+     - ``whatsapp_account_manage``
+     - Create a WhatsApp newsletter channel.
+   * - ``create_community``
+     - ``whatsapp_account_manage``
+     - Create a WhatsApp community.
+   * - ``create_group``
+     - ``whatsapp_account_manage``
+     - Create a group with explicitly selected known participants.
+   * - ``create_group_event``
+     - ``whatsapp_account_write``
+     - Create a scheduled group event using Unix timestamps; never returns its secret.
+   * - ``create_label``
+     - ``whatsapp_account_manage``
+     - Create an account label with a WhatsApp color index.
+   * - ``create_poll``
+     - ``whatsapp_account_write``
+     - Create a poll with two to twelve unique options; retain its secret privately.
+   * - ``deactivate_community``
+     - ``whatsapp_account_manage``
+     - Deactivate a community administered by this account.
+   * - ``decide_group_requests``
+     - ``whatsapp_account_manage``
+     - Approve or reject explicit group membership requests.
+   * - ``decide_message``
+     - ``admin``
+     - Approve, reject or cancel a queued text; the first applicable decision wins.
+   * - ``delete_label``
+     - ``whatsapp_account_manage``
+     - Delete an account label.
+   * - ``delete_message``
+     - ``whatsapp_account_write``
+     - Delete an observed message for this account only, preserving downloaded media.
+   * - ``download_media``
+     - ``whatsapp_account_read``
+     - Download bounded media from a synchronized message.
+   * - ``edit_message``
+     - ``whatsapp_account_write``
+     - Edit an observed outgoing message; provider time limits still apply.
+   * - ``follow_channel``
+     - ``whatsapp_account_manage``
+     - Follow or unfollow a newsletter channel.
+   * - ``get_audit_log``
+     - ``admin``
+     - Read operation metadata without message text or credentials.
+   * - ``get_channel``
+     - ``whatsapp_account_read``
+     - Read newsletter channel metadata.
+   * - ``get_channel_messages``
+     - ``whatsapp_account_read``
+     - Read one provider page from a newsletter; server IDs differ from message IDs.
+   * - ``get_channels``
+     - ``whatsapp_account_read``
+     - List permitted subscribed newsletter channels.
+   * - ``get_chat``
+     - ``whatsapp_account_read``
+     - Read locally observed metadata for one chat.
+   * - ``get_chats``
+     - ``whatsapp_account_read``
+     - List locally observed permitted chats.
+   * - ``get_community_groups``
+     - ``whatsapp_account_read``
+     - List permitted community subgroups.
+   * - ``get_contacts``
+     - ``whatsapp_account_read``
+     - Search permitted contacts; preserve ambiguous names.
+   * - ``get_events``
+     - ``whatsapp_account_read``
+     - Replay permitted event identifiers from the bounded persistent journal.
+   * - ``get_group``
+     - ``whatsapp_account_read``
+     - Fetch group metadata from WhatsApp.
+   * - ``get_group_invite``
+     - ``whatsapp_account_manage``
+     - Get a group invitation link, optionally revoking the previous link.
+   * - ``get_group_members``
+     - ``whatsapp_account_read``
+     - Fetch a page of current group participants.
+   * - ``get_group_requests``
+     - ``whatsapp_account_manage``
+     - List pending group membership requests.
+   * - ``get_message_status``
+     - ``whatsapp_account_read``
+     - Get submission state and per-recipient observed receipts.
+   * - ``get_messages``
+     - ``whatsapp_account_read``
+     - Read synchronized messages, including provider-known aliases.
+   * - ``get_outbox``
+     - ``whatsapp_account_read``
+     - Read permitted queued texts and dispatch outcomes.
+   * - ``get_policy``
+     - ``admin``
+     - Read account operation and chat grants.
+   * - ``get_poll_results``
+     - ``whatsapp_account_read``
+     - Aggregate retained poll votes; reports gaps and decryption failures.
+   * - ``get_privacy``
+     - ``whatsapp_account_read``
+     - Read account privacy settings.
+   * - ``get_profile_picture``
+     - ``whatsapp_account_read``
+     - Get profile picture metadata; availability depends on privacy settings.
+   * - ``get_status``
+     - ``whatsapp_account_read``
+     - Get connection state and visible record counts.
+   * - ``get_sync_status``
+     - ``whatsapp_account_read``
+     - Get history coverage and callback failures without initiating sync.
+   * - ``get_unread``
+     - ``whatsapp_account_read``
+     - List chats observed as unread; unknown states are excluded.
+   * - ``leave_group``
+     - ``whatsapp_account_manage``
+     - Leave a group.
+   * - ``link_community_groups``
+     - ``whatsapp_account_manage``
+     - Link or unlink subgroups; requires admin grants on every affected group.
+   * - ``mark_read``
+     - ``whatsapp_account_write``
+     - Mark a chat read or unread on WhatsApp.
+   * - ``mute_channel``
+     - ``whatsapp_account_write``
+     - Mute or unmute a followed newsletter channel.
+   * - ``mute_chat``
+     - ``whatsapp_account_write``
+     - Mute or unmute a chat on WhatsApp.
+   * - ``pin_chat``
+     - ``whatsapp_account_write``
+     - Pin or unpin a chat on this account.
+   * - ``react_channel_message``
+     - ``whatsapp_account_write``
+     - React to a newsletter message using its numeric server ID.
+   * - ``react_message``
+     - ``whatsapp_account_write``
+     - React to a synchronized message; empty reaction removes it.
+   * - ``reply_message``
+     - ``whatsapp_account_write``
+     - Reply quoting a synchronized message.
+   * - ``request_history``
+     - ``whatsapp_account_read``
+     - Request older history from a known anchor; completion is asynchronous.
+   * - ``respond_group_event``
+     - ``whatsapp_account_write``
+     - Respond Going, NotGoing or Maybe to a retained group event.
+   * - ``revoke_message``
+     - ``whatsapp_account_write``
+     - Revoke your own observed message for everyone; provider limits apply.
+   * - ``save_contact``
+     - ``whatsapp_account_manage``
+     - Save a contact using an exact personal JID.
+   * - ``schedule_message``
+     - ``whatsapp_account_write``
+     - Queue a text for a Unix timestamp; approval is required by default.
+   * - ``search_messages``
+     - ``whatsapp_account_read``
+     - Search local text in permitted chats only.
+   * - ``send_channel_text``
+     - ``whatsapp_account_write``
+     - Publish text to a newsletter channel you administer.
+   * - ``send_chat_state``
+     - ``whatsapp_account_write``
+     - Send a typing, recording or paused indication.
+   * - ``send_media``
+     - ``whatsapp_account_write``
+     - Send supplied image, document or audio bytes, never server paths.
+   * - ``send_text``
+     - ``whatsapp_account_write``
+     - Send explicit text to an exact known JID.
+   * - ``set_chat_label``
+     - ``whatsapp_account_write``
+     - Assign or remove a label from a chat.
+   * - ``set_disappearing_default``
+     - ``whatsapp_account_manage``
+     - Set the default disappearing-message duration for new chats.
+   * - ``set_group_approval``
+     - ``whatsapp_account_manage``
+     - Enable or disable approval of group membership requests.
+   * - ``set_group_description``
+     - ``whatsapp_account_manage``
+     - Change a group description using its current revision.
+   * - ``set_group_disappearing``
+     - ``whatsapp_account_manage``
+     - Set disappearing messages for a group.
+   * - ``set_group_member_add``
+     - ``whatsapp_account_manage``
+     - Choose who may add group members.
+   * - ``set_group_setting``
+     - ``whatsapp_account_manage``
+     - Set an explicitly supported group permission or sharing setting.
+   * - ``set_group_title``
+     - ``whatsapp_account_manage``
+     - Change a group title.
+   * - ``set_policy``
+     - ``admin``
+     - Replace account grants durably; administrator only.
+   * - ``set_presence``
+     - ``whatsapp_account_manage``
+     - Set account online availability.
+   * - ``set_privacy``
+     - ``whatsapp_account_manage``
+     - Set a named privacy setting; unsupported combinations are rejected by WhatsApp.
+   * - ``set_profile_about``
+     - ``whatsapp_account_manage``
+     - Set the account about text.
+   * - ``set_profile_name``
+     - ``whatsapp_account_manage``
+     - Set the account display name.
+   * - ``star_message``
+     - ``whatsapp_account_write``
+     - Star or unstar an observed message.
+   * - ``update_channel``
+     - ``whatsapp_account_manage``
+     - Change newsletter channel title and description.
+   * - ``update_group_members``
+     - ``whatsapp_account_manage``
+     - Add, remove, promote or demote explicitly selected group participants.
+   * - ``vote_poll``
+     - ``whatsapp_account_write``
+     - Vote in a retained poll; an empty selection withdraws a vote.
+
+Media and mutations
+~~~~~~~~~~~~~~~~~~~
+
+``send_media`` accepts ``image``, ``document``, ``audio``, ``voice``, ``video``,
+``gif`` and ``sticker`` with the existing 5 MiB byte limit. Voice sets the PTT
+flag; GIF uses video playback and requires suitable video bytes, not an arbitrary
+GIF file. Stickers require provider-compatible sticker bytes. The adapter does
+not transcode or infer MIME types. Audio, voice and sticker captions are rejected.
+
+``edit_message`` and ``revoke_message`` only target retained outgoing messages.
+``delete_message`` deletes for this account; ``revoke_message`` requests deletion
+for everyone. WhatsApp may reject changes because of age, permissions or message
+type. A returned response is not proof that every other device has synchronized.
+Neither deletion tool deletes separately downloaded files. Stars and pins are
+provider operations; their local listing state is not yet indexed.
+
+Group description changes use ``description_id`` as the optimistic concurrency
+token. A conflict is returned to the caller, never retried with a stale value.
+Community linking checks the community and every affected group's administration
+grant. Unlinking does not request orphan-member removal. Group admission results
+preserve individual errors. Provider administrator rights remain necessary.
+
+Polls and group events
+~~~~~~~~~~~~~~~~~~~~~~
+
+Polls allow two to twelve unique choices and an explicit selection count. Poll
+and event secrets are retained in the private database and never returned by
+MCP. Voting and RSVP require either locally created state or a retained original
+message containing its secret and creator. Missing data produces a conflict;
+the application cannot reconstruct an unavailable secret.
+
+``vote_poll`` accepts an empty list to withdraw a vote. ``get_poll_results``
+aggregates retained encrypted updates, tries provider-known PN/LID aliases and
+uses the newest observed vote per person. It reports ``observed_votes_only``,
+``undecryptable_updates`` and ``scan_truncated``. The bounded scan considers at
+most 10,000 retained messages in the chat. Absence of votes is never evidence that
+nobody voted remotely. ``create_group_event`` takes Unix timestamps in seconds;
+``respond_group_event`` accepts ``Going``, ``NotGoing`` or ``Maybe``.
+
+Persistent text scheduling and approval
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``schedule_message(chat_id, text, due, approval_required=True)`` records a text
+for a future Unix timestamp, at most one year ahead. It returns a stable job ID.
+Approval is the caller's explicit choice, defaulting to required; this option is
+not a mandatory organization-wide approval rule. Restrict the scheduling tool
+if callers must not be able to choose direct scheduling.
+
+An ``admin`` uses ``decide_message(job_id, decision)`` with ``approve``, ``reject``
+or ``cancel``. The first approval/rejection wins; later requests return the
+recorded state and decision actor. Cancellation is possible while pending or
+scheduled. ``get_outbox`` exposes only chats with a current read grant.
+
+The worker waits for the next deadline or a queue-change event, without fixed
+interval polling. At dispatch it checks current ``schedule_message`` and
+``send_text`` grants. Policy denial or disconnection marks the entry ``blocked``;
+they are not retried automatically. An interrupted, timed-out or failed send is
+``unconfirmed``. Startup converts leftover ``sending`` entries to ``unconfirmed``.
+A confirmed local result is ``submitted``, not delivered. The worker never
+replays an uncertain send; inspect the chat before creating a replacement job.
+Scheduled messages retain the submitter's identity but not their bearer token;
+account policy is rechecked, while avatar-role revocation alone does not cancel
+an already delegated job. Cancel jobs explicitly when withdrawing delegation.
+Scheduling currently supports text only. A reminder is a scheduled text to an
+explicit recipient; it does not install a hidden recurring task.
+
+Durable event replay
+~~~~~~~~~~~~~~~~~~~~
+
+Live subscriptions remain push-based and ephemeral. In addition, ``get_events``
+accepts ``after_id`` and ``limit`` to recover persisted event identifiers after a
+client reconnects. It returns ``next_cursor``, ``has_more`` and ``retention_gap``.
+The journal retains the latest 10,000 events, contains no bodies or secrets and
+filters chat permissions before pagination. This is a recovery API, not an
+automatic polling monitor or remote callback service.
+
+Several accounts in one server
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Pass ``--accounts /absolute/path/accounts.json`` with a mapping such as:
+
+.. code-block:: json
+
+   {
+     "personal": "/private/path/personal-session",
+     "support": "/private/path/support-session"
+   }
+
+Each account must have been paired separately and have a distinct private
+session directory. Endpoints become ``/personal/_mcp`` and ``/support/_mcp``.
+Each application has its own database, policy, event journal, queue and lock.
+``--session-dir`` still owns server storage and ``mcp.token``. This example uses
+one shared owner token for every mounted account: it is not tenant isolation.
+Use a proper Kajenn identity application for independently authorized operators.
+
+Remaining boundaries
+~~~~~~~~~~~~~~~~~~~~
+
+This expansion does not claim complete parity with the WhatsApp UI. Remaining
+work includes whole-chat deletion/clearing semantics against incomplete history,
+profile/group photo uploads, channel media and subscriber administration,
+status/story publishing, contact registration lookup, richer label listings,
+privacy exception lists, recurring schedules and attachment scheduling.
+The SDK exposes some of these primitives, but this prototype does not expose
+unverified workflows through a generic escape hatch. Audio/video calling needs
+an active media transport and remains a separate integration. Full remote
+history is not guaranteed by the linked-device protocol.
+
+Offline tests validate schemas, permission denial, persistence, restart recovery,
+provider argument construction and protobuf handling. They do not prove that
+WhatsApp accepts every mutation on a real account. No personal messages, group
+changes, profile changes or new device associations are performed by the tests.
 
 Before publication
 ------------------

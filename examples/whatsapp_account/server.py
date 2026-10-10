@@ -16,6 +16,9 @@
 
 import argparse
 import hmac
+import json
+import re
+from functools import partial
 import os
 from pathlib import Path
 import secrets
@@ -55,8 +58,26 @@ class _Server:
     def __init__(self, arguments):
         self.arguments = arguments
 
-    def create_connection(self):
-        return _Connection(self.arguments.session_dir, self.arguments.resync)
+    def account_mounts(self):
+        config = getattr(self.arguments, "accounts", None)
+        accounts = json.loads(config.read_text()) if config else {"whatsapp": str(self.arguments.session_dir)}
+        if not isinstance(accounts, dict) or not 1 <= len(accounts) <= 20:
+            raise ValueError("accounts must map one to twenty mount names to private session directories")
+        mounts = []
+        used = set()
+        for code, path in accounts.items():
+            if not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", code) or code == "identity":
+                raise ValueError("Invalid or reserved account mount name")
+            if not isinstance(path, str) or not Path(path).is_absolute():
+                raise ValueError("Account session directories must be absolute paths")
+            directory = Path(path)
+            if directory.resolve() in used:
+                raise ValueError("Each account requires a separate session directory")
+            used.add(directory.resolve())
+            mounts.append((WhatsAppAccountApplication,
+                           {"code": code, "connection_factory": partial(_Connection, directory, self.arguments.resync),
+                            "policy": {"operations": ["*"], "chats": {"*": ["read", "write", "admin"]}}}))
+        return mounts
 
     def run(self):
         directory = self.arguments.session_dir
@@ -75,9 +96,7 @@ class _Server:
         server = AsgiServer(
             applications=[
                 (_Identity, {"code": "identity", "token_path": str(token_path)}),
-                (WhatsAppAccountApplication,
-                 {"code": "whatsapp", "connection_factory": self.create_connection,
-                  "policy": {"operations": ["*"], "chats": {"*": ["read", "write", "admin"]}}}),
+                *self.account_mounts(),
             ],
             storage=[{"name": "site", "protocol": "local", "base_path": str(directory / "site")}],
             channels={name: {"authentication_route": "/identity/check"}
@@ -90,6 +109,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--session-dir", type=Path, required=True)
     parser.add_argument("--port", type=int, default=8766)
+    parser.add_argument("--accounts", type=Path, help="JSON mapping mount names to separate session directories; one shared owner")
     parser.add_argument("--resync", action="store_true", help="Replay app-state directory metadata")
     _Server(parser.parse_args()).run()
 

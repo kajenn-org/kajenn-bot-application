@@ -52,10 +52,11 @@ access and REST/MCP bot administration are included in the **0.2.0b1 beta**.
 
 ## Personal WhatsApp account prototype
 
-The source-tree `examples/whatsapp_account` application exposes 25 authenticated
+The source-tree `examples/whatsapp_account` application exposes 75 authenticated
 REST/MCP tools for contacts, synchronized messages, replies, media, chat state,
-groups, policy and audit. It includes provider receipts and in-process event
-subscriptions without polling. It uses a pinned, locally patched Tryx build and
+groups, channels, communities, polls, events, profile, privacy, policy and audit.
+It includes scheduled texts with optional approval, an event journal, multiple
+account mounts and in-process event subscriptions without polling. It uses a pinned, locally patched Tryx build and
 is **not included in the published wheel**. Device and directory storage use
 private filesystem permissions, without encryption at rest.
 
