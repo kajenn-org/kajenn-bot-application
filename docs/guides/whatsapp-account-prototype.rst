@@ -680,8 +680,16 @@ text, transcripts and audio are not added to audit records. Transcripts are
 returned only; they are neither persisted nor sent as WhatsApp replies.
 
 The default has no speech engine and returns 503 before downloading audio.
-For local recognition, install ``faster-whisper`` in the server's Python
-environment and obtain a compatible CTranslate2 model directory explicitly.
+For local recognition, install the compatible optional dependencies in the
+server's Python environment and obtain a CTranslate2 model directory explicitly:
+
+.. code-block:: console
+
+   python -m pip install -r examples/whatsapp_account/requirements-transcription.txt
+
+The dependency file excludes PyAV 19, whose removed ``metadata_errors`` argument
+is used by faster-whisper 1.2.1. Verify the native audio decoder with
+``python -m pytest examples/whatsapp_account/test_transcription_native.py --no-cov``.
 Start the server with ``--transcription-model /absolute/path/to/model``.
 The model must already exist locally: the worker sets offline mode and uses
 ``local_files_only=True``. No hosted transcription service is selected implicitly.
