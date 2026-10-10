@@ -51,7 +51,7 @@ See the [personal account guide](docs/guides/telegram-account.md). Personal acco
 access and REST/MCP bot administration are included in the **0.2.0b1 beta**.
 
 The current source checkout expands the personal Telegram account to **37 MCP
-tools**, including media, local voice transcription, reactions, contacts, polls
+tools**, including media, local voice transcription, reactions, contacts, polls,
 native Telegram scheduling, encrypted event replay and audit, and administrator-approved
 text requests. Install `.[transcription]` for the optional
 shared local speech engine. These additions are not yet in the PyPI release.

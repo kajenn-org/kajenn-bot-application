@@ -1,7 +1,7 @@
 WhatsApp account prototype
 ==========================
 
-Version: 0.4 — Last updated: 2026-10-10 — Status: UNDER REVIEW
+Version: 0.5 — Last updated: 2026-10-10 — Status: UNDER REVIEW
 
 This source-tree prototype evaluates a personal WhatsApp linked device using
 Tryx and whatsapp-rust. It includes a source-tree ``WhatsAppAccountApplication`` and a local test
@@ -27,6 +27,10 @@ The SQLite store contains plaintext device secrets. Filesystem permissions are
 not encryption at rest. Use a test account on a protected local volume; the
 production design must settle encryption and key ownership before publication.
 The harness targets macOS/Linux, including its no-follow filesystem checks.
+
+This guide describes the expanded source branch. Installing only the released
+``kajenn-bot-application==0.2.0b1`` wheel does not install this prototype. Keep the
+checkout available when starting ``examples.whatsapp_account.server``.
 
 Build the experimental dependency
 ---------------------------------
@@ -113,13 +117,66 @@ Applications embedding the class must provide their own identity route and
 initial policy; an omitted policy denies operations. No credentials or pairing
 operations are exposed as tools.
 
+The source-tree server also exposes POST operations at
+``/whatsapp/_account/<operation>``. The MCP endpoint receives JSON-RPC methods
+in the request body; tool names are not appended to its URL.
+
+First MCP calls
+~~~~~~~~~~~~~~~
+
+For the single-account example, keep the token in a private client configuration.
+This shell example reads the generated owner credential without printing it:
+
+.. code-block:: bash
+
+   export KAJENN_ACCOUNT_DIR="$HOME/.kajenn/whatsapp-test"
+   export KAJENN_WHATSAPP_MCP_TOKEN="$(cat "$KAJENN_ACCOUNT_DIR/mcp.token")"
+   curl --fail-with-body http://127.0.0.1:8766/whatsapp/_mcp \
+     -H "Authorization: Bearer $KAJENN_WHATSAPP_MCP_TOKEN" \
+     -H 'Content-Type: application/json' \
+     --data '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+Use the same headers and endpoint for these request bodies:
+
+.. code-block:: json
+
+   {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_contacts","arguments":{"query":"Carla","limit":10}}}
+
+Contact results include ``id``, ``pn`` and ``lid`` when observed. Choose the
+intended exact contact; do not treat a name match as authorization to send.
+PN identifiers end in ``@s.whatsapp.net``, linked identities in ``@lid``, groups
+in ``@g.us``, and channels in ``@newsletter``. Use returned identifiers rather
+than guessing one from a display name. Then request a bounded local history page:
+
+.. code-block:: json
+
+   {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_messages","arguments":{"chat_id":"123@s.whatsapp.net","limit":20,"offset":0}}}
+
+Replace the illustrative ID with an actual permitted result. Follow
+``next_offset`` until it is null, preserving the chat and search filters.
+Successful tool payloads are in ``result.structuredContent``; also inspect
+JSON-RPC ``error`` and tool-level ``isError``. An HTTP 200 alone is not proof that
+the requested operation succeeded. Reading cached history does not initiate
+synchronization or mark the chat read.
+
+For a retained audio message, an explicit transcription request is:
+
+.. code-block:: json
+
+   {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"transcribe_message","arguments":{"chat_id":"123@s.whatsapp.net","message_id":"RETURNED_MESSAGE_ID","language":"it"}}}
+
+A send uses ``send_text`` with explicit ``chat_id`` and ``text``. A reply uses
+``reply_message`` with the original ``message_id`` as well. Both are real account
+mutations; discovery and the read examples above do not send anything.
+
 Commands and roles
 ~~~~~~~~~~~~~~~~~~
 
-Kajenn filters MCP discovery and execution by avatar roles. All commands are also
+kajenn filters MCP discovery and execution by avatar roles. All commands are also
 available on the application's REST routing surface. The application additionally
 checks its persistent operation and chat policy on execution, including calls
-from trusted Python code. There are 76 MCP tools. The original command families are:
+from trusted Python code. There are 76 MCP tools. See :doc:`whatsapp-account-tools` for every
+parameter, default, avatar role and primary chat grant. The command families are:
 
 .. list-table:: Account commands
    :header-rows: 1
@@ -171,9 +228,10 @@ confirmation. ``get_message_status`` lists observed receipts per recipient. A
 read receipt from one group member does not imply that everyone read the message.
 Receipts may precede local submission records and can arrive out of order.
 
-``send_media`` accepts ``kind`` (``image``, ``document`` or ``audio``),
+``send_media`` accepts ``kind`` (``image``, ``document``, ``audio``, ``voice``,
+``video``, ``gif`` or ``sticker``),
 ``content_base64``, ``mimetype``, optional display ``filename`` and ``caption``.
-Audio captions are rejected. Supplied bytes are limited to 5 MiB; local paths and
+Audio, voice and sticker captions are rejected. Supplied bytes are limited to 5 MiB; local paths and
 URLs are not accepted. ``download_media`` identifies an already synchronized
 message and returns base64 content. It rejects unknown or oversized advertised
 lengths before downloading, and oversized returned bytes afterward. The native
@@ -614,60 +672,7 @@ session directory. Endpoints become ``/personal/_mcp`` and ``/support/_mcp``.
 Each application has its own database, policy, event journal, queue and lock.
 ``--session-dir`` still owns server storage and ``mcp.token``. This example uses
 one shared owner token for every mounted account: it is not tenant isolation.
-Use a proper Kajenn identity application for independently authorized operators.
-
-Remaining boundaries
-~~~~~~~~~~~~~~~~~~~~
-
-This expansion does not claim complete parity with the WhatsApp UI. Remaining
-work includes whole-chat deletion/clearing semantics against incomplete history,
-profile/group photo uploads, channel media and subscriber administration,
-status/story publishing, contact registration lookup, richer label listings,
-privacy exception lists, recurring schedules and attachment scheduling.
-The SDK exposes some of these primitives, but this prototype does not expose
-unverified workflows through a generic escape hatch. Audio/video calling needs
-an active media transport and remains a separate integration. Full remote
-history is not guaranteed by the linked-device protocol.
-
-Offline tests validate schemas, permission denial, persistence, restart recovery,
-provider argument construction and protobuf handling. They do not prove that
-WhatsApp accepts every mutation on a real account. No personal messages, group
-changes, profile changes or new device associations are performed by the tests.
-
-Before publication
-------------------
-
-Further live checks include transient network failure, sending to a designated
-test chat, graceful shutdown while receiving and phone-confirmed revocation.
-The offline suite does not perform those operations. Production integration also
-needs encryption and key ownership, retention, deployment packaging and
-end-to-end live validation of media, groups, receipts and history requests.
-A browser that owns its own session is a separate execution boundary; server MCP
-grants cannot constrain someone who owns the local device credentials.
-
-Browser path
-------------
-
-The same Rust protocol family is exposed through ``@oxidezap/baileyrs/host`` and
-``@oxidezap/whatsapp-rust-bridge/host``. Python and JavaScript adapters are different
-packages and may pin different revisions; session portability is not assumed.
-A browser may control the central application, or own its own linked device.
-One active executor owns each session; automations that must survive closing the
-browser belong on the server.
-
-The reference Oxidezap browser client uses a deferred IndexedDB SQLite backend
-when OPFS is unavailable. A tab crash can lose the latest unflushed writes. A
-production browser integration needs persistence/recovery and multiple-tab tests,
-plus checks of its real network origin and media support. Successful bundling and
-WASM initialization alone are not end-to-end browser validation.
-
-References
-----------
-
-* `Tryx <https://github.com/krypton-byte/tryx>`_
-* `whatsapp-rust <https://github.com/oxidezap/whatsapp-rust>`_
-* `baileyrs <https://github.com/oxidezap/baileyrs>`_
-* `Oxidezap browser storage <https://github.com/oxidezap/client/blob/main/crates/session/src/store/web.rs>`_
+Use a proper kajenn identity application for independently authorized operators.
 
 On-demand voice transcription
 -----------------------------
@@ -711,3 +716,94 @@ the ``transcriber`` constructor argument. It returns ``text``, ``language`` and
 optional engine metadata. An external provider must be explicitly configured by
 the deployer, who determines where audio is sent. The MCP caller cannot select
 an endpoint, executable, model path or credentials.
+
+Remaining boundaries
+~~~~~~~~~~~~~~~~~~~~
+
+This expansion does not claim complete parity with the WhatsApp UI. Remaining
+work includes whole-chat deletion/clearing semantics against incomplete history,
+profile/group photo uploads, channel media and subscriber administration,
+status/story publishing, contact registration lookup, richer label listings,
+privacy exception lists, recurring schedules and attachment scheduling.
+The SDK exposes some of these primitives, but this prototype does not expose
+unverified workflows through a generic escape hatch. Audio/video calling needs
+an active media transport and remains a separate integration. Full remote
+history is not guaranteed by the linked-device protocol.
+
+Offline tests validate schemas, permission denial, persistence, restart recovery,
+provider argument construction and protobuf handling. They do not prove that
+WhatsApp accepts every mutation on a real account. No personal messages, group
+changes, profile changes or new device associations are performed by the tests.
+
+Troubleshooting and recovery
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. list-table:: Diagnose without guessing delivery or history coverage
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Symptom
+     - Check
+   * - Import or native build failure
+     - Use the pinned Rust toolchain and the locally patched Tryx wheel. An unrelated PyPI Tryx build is not a substitute.
+   * - Session ownership or permissions error
+     - Stop the process owning that session directory. Keep the directory 0700 and private files 0600; do not delete the lease to run a second owner.
+   * - Pairing required during server startup
+     - Stop the server and run the explicit local pairing harness. There is no pairing MCP tool.
+   * - Authentication failure or an absent tool
+     - Check the bearer credential and avatar roles. The bundled token is one shared owner, not separate operator identities.
+   * - A visible tool returns forbidden
+     - Check its operation grant, exact chat entry and provider-known PN/LID aliases. A matching exact denial overrides wildcard access.
+   * - Empty contacts or history
+     - Check ``get_sync_status``, callback failures, aliases and coverage. ``--resync`` replays metadata; it does not guarantee full chat history.
+   * - Unknown quote, media or poll target
+     - The original message payload or secret must be retained. ``request_history`` needs an existing usable anchor and may not supply the missing data.
+   * - Transcription returns 503
+     - Configure a local model and compatible optional dependencies. No engine or model is downloaded implicitly.
+   * - Outbox is ``pending``
+     - An administrator must decide the request. Reaching its due time does not waive approval.
+   * - Outbox is ``blocked`` or ``unconfirmed``
+     - Inspect its error, current policy, connectivity and the actual chat. No automatic retry or resume is provided; do not create a replacement until the outcome is understood.
+
+Stop the server before taking a consistent copy of its private session directory,
+including SQLite state and any journal/WAL files. Protect backups like linked-device
+credentials. Restore to a single executor; never run two copies of one session.
+The outbox and directory belong to that paired account. Use a new directory when
+switching to a different account, so queued messages and indexed data cannot be
+mistaken for the new account's state. Removing local files does not revoke a
+linked device; confirm revocation using the phone's linked-device interface.
+
+Before publication
+------------------
+
+Further live checks include transient network failure, sending to a designated
+test chat, graceful shutdown while receiving and phone-confirmed revocation.
+The offline suite does not perform those operations. Production integration also
+needs encryption and key ownership, retention, deployment packaging and
+end-to-end live validation of media, groups, receipts and history requests.
+A browser that owns its own session is a separate execution boundary; server MCP
+grants cannot constrain someone who owns the local device credentials.
+
+Browser path
+------------
+
+The same Rust protocol family is exposed through ``@oxidezap/baileyrs/host`` and
+``@oxidezap/whatsapp-rust-bridge/host``. Python and JavaScript adapters are different
+packages and may pin different revisions; session portability is not assumed.
+A browser may control the central application, or own its own linked device.
+One active executor owns each session; automations that must survive closing the
+browser belong on the server.
+
+The reference Oxidezap browser client uses a deferred IndexedDB SQLite backend
+when OPFS is unavailable. A tab crash can lose the latest unflushed writes. A
+production browser integration needs persistence/recovery and multiple-tab tests,
+plus checks of its real network origin and media support. Successful bundling and
+WASM initialization alone are not end-to-end browser validation.
+
+References
+----------
+
+* `Tryx <https://github.com/krypton-byte/tryx>`_
+* `whatsapp-rust <https://github.com/oxidezap/whatsapp-rust>`_
+* `baileyrs <https://github.com/oxidezap/baileyrs>`_
+* `Oxidezap browser storage <https://github.com/oxidezap/client/blob/main/crates/session/src/store/web.rs>`_

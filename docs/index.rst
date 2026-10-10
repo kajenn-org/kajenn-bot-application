@@ -11,6 +11,10 @@ The package provides independent bot instances, class-owned configuration,
 optional administrator admission, announcements, media and persistent reminders.
 It depends on kajenn and has its own release cycle.
 
+Choose among the :doc:`four integrations <components>` before configuring a
+bot token, personal session or business number. Account integrations have their
+own permissions and persistence contracts.
+
 Start here
 ----------
 
@@ -31,6 +35,7 @@ interchangeable.
    :maxdepth: 1
    :caption: Learn
 
+   components
    getting-started
    guides/bots
    guides/writing-bots
@@ -53,6 +58,7 @@ interchangeable.
    :caption: Reference and contribute
 
    api
+   guides/whatsapp-account-tools
    development
    migration
 
