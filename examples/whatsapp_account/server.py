@@ -41,7 +41,8 @@ class _Identity(RoutedApplication):
     def check(self, credential: str = "", channel: str = "") -> dict:
         if not hmac.compare_digest(credential, f"Bearer {self.token}"):
             raise HTTPUnauthorized("Invalid account credential")
-        return {"identity": "local-owner", "tags": ["whatsapp_account"], "data": {}}
+        return {"identity": "local-owner", "tags": ["whatsapp_account_read", "whatsapp_account_write",
+                                                   "whatsapp_account_manage", "admin"], "data": {}}
 
     async def __call__(self, scope, receive, send):
         if scope.get("kajenn.kbus"):
@@ -75,7 +76,8 @@ class _Server:
             applications=[
                 (_Identity, {"code": "identity", "token_path": str(token_path)}),
                 (WhatsAppAccountApplication,
-                 {"code": "whatsapp", "connection_factory": self.create_connection}),
+                 {"code": "whatsapp", "connection_factory": self.create_connection,
+                  "policy": {"operations": ["*"], "chats": {"*": ["read", "write", "admin"]}}}),
             ],
             storage=[{"name": "site", "protocol": "local", "base_path": str(directory / "site")}],
             channels={name: {"authentication_route": "/identity/check"}

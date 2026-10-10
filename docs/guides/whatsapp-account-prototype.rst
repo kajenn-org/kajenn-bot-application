@@ -1,7 +1,7 @@
 WhatsApp account prototype
 ==========================
 
-Version: 0.2 — Last updated: 2026-10-10 — Status: UNDER REVIEW
+Version: 0.3 — Last updated: 2026-10-10 — Status: UNDER REVIEW
 
 This source-tree prototype evaluates a personal WhatsApp linked device using
 Tryx and whatsapp-rust. It includes a source-tree ``WhatsAppAccountApplication`` and a local test
@@ -34,7 +34,7 @@ Build the experimental dependency
 Run commands from the repository root with Python 3.11 or newer, Git and Rust
 1.94.0 available. Building needs a native compiler and access to GitHub/crates.io.
 The builder fixes both upstream revisions and supplies a resolved Cargo lockfile.
-The wheel has the distinct local version ``1.5.0+kajenn.3``; it is not on PyPI.
+The wheel has the distinct local version ``1.5.0+kajenn.4``; it is not on PyPI.
 
 .. code-block:: console
 
@@ -49,7 +49,9 @@ The MIT-licensed lifecycle patch adds three methods to ``AdvancedClient``:
 stops the connection, and ``logout`` requests companion-device removal before
 stopping. ``TRYX-LICENSE`` accompanies the patch. The repository's Python harness
 is Apache-2.0. Additional patches expose app-state replay and fix nested
-Protobuf action lookup for contact and chat updates.
+Protobuf action lookup for contact and chat updates. The history patch exposes
+``fetch_message_history`` from the pinned Rust client; its result acknowledges
+the request, not completion of history transfer.
 
 Offline verification
 --------------------
@@ -104,20 +106,156 @@ contents as the ``Authorization: Bearer <token>`` header; never paste it into
 chat, logs or source control. This command does not register an MCP client or
 start a background system service. Stop it normally to flush the session.
 
-Authentication creates a local-owner avatar with the ``whatsapp_account`` tag.
-Kajenn filters tool discovery and execution using that avatar. The tools are:
+The local token identifies the account owner. The example gives that avatar
+``whatsapp_account_read``, ``whatsapp_account_write``, ``whatsapp_account_manage``
+and ``admin`` roles, with an explicitly permissive initial account policy.
+Applications embedding the class must provide their own identity route and
+initial policy; an omitted policy denies operations. No credentials or pairing
+operations are exposed as tools.
 
-* ``get_status``: connection state, record counts, replay state and callback errors.
-* ``get_contacts``: bounded name search, preserving ambiguous matches.
-* ``get_chats``: observed conversations, excluding known archived chats by default.
-* ``get_messages``: locally retained text messages for an exact known JID.
-* ``send_text``: an explicitly requested message to an exact known JID.
+Commands and roles
+~~~~~~~~~~~~~~~~~~
 
-Contact lookup never chooses among names automatically. Sending requires a JID
-returned by contacts or chats; success means submitted, not delivered. Pairing,
-logout, credentials and resynchronization are not exposed as remote tools.
-This prototype grants all five tools to the owner; per-operation grants are not
-implemented here.
+Kajenn filters MCP discovery and execution by avatar roles. All commands are also
+available on the application's REST routing surface. The application additionally
+checks its persistent operation and chat policy on execution, including calls
+from trusted Python code. There are 25 MCP tools:
+
+.. list-table:: Account commands
+   :header-rows: 1
+   :widths: 24 48 28
+
+   * - Role
+     - Commands
+     - Contract
+   * - ``whatsapp_account_read``
+     - ``get_status``, ``get_sync_status``
+     - Connection, visible counts, observed coverage and callback errors.
+   * - ``whatsapp_account_read``
+     - ``get_contacts``, ``get_chats``, ``get_chat``, ``get_unread``
+     - Bounded local queries; unread is an observed flag, not inferred from age.
+   * - ``whatsapp_account_read``
+     - ``get_messages``, ``search_messages``, ``get_message_status``
+     - Local text search, retained message IDs and observed per-recipient receipts.
+   * - ``whatsapp_account_read``
+     - ``download_media``, ``request_history``
+     - Media retrieval and asynchronous history requests from stored messages.
+   * - ``whatsapp_account_read``
+     - ``get_group``, ``get_group_members``
+     - Remote group metadata and paginated participant results.
+   * - ``whatsapp_account_write``
+     - ``send_text``, ``reply_message``, ``react_message``, ``send_media``
+     - Exact recipients, explicit content and known reply/reaction targets.
+   * - ``whatsapp_account_write``
+     - ``mark_read``, ``archive_chat``, ``mute_chat``
+     - Boolean state changes; ``False`` reverses the requested state.
+   * - ``whatsapp_account_manage``
+     - ``create_group``, ``update_group_members``
+     - Explicit participants; provider-side administrator permissions still apply.
+   * - ``admin``
+     - ``get_policy``, ``set_policy``, ``get_audit_log``
+     - Durable account grants and operation audit metadata.
+
+Queries use ``limit`` (1–100) and ``offset`` (0–1,000,000). Follow ``next_offset``
+with unchanged filters. Contact lookup preserves ambiguous names. A contact does
+not imply an existing chat. ``search_messages`` accepts ``query`` and an optional
+``chat_id``; it searches the local synchronized subset only. Policy filtering
+happens before pagination and covers contacts, chats, search, unread and counts.
+
+``send_text(chat_id, text)`` and ``reply_message(chat_id, message_id, text)`` accept
+up to 4,000 characters. Replies quote retained Protobuf content and the original
+sender. ``react_message`` accepts an emoji string, or an empty string to remove
+one. No command resolves a recipient by choosing among names. The returned ID
+comes from the provider's ``SendResult.message_id``; ``submitted`` is not delivery
+confirmation. ``get_message_status`` lists observed receipts per recipient. A
+read receipt from one group member does not imply that everyone read the message.
+Receipts may precede local submission records and can arrive out of order.
+
+``send_media`` accepts ``kind`` (``image``, ``document`` or ``audio``),
+``content_base64``, ``mimetype``, optional display ``filename`` and ``caption``.
+Audio captions are rejected. Supplied bytes are limited to 5 MiB; local paths and
+URLs are not accepted. ``download_media`` identifies an already synchronized
+message and returns base64 content. It rejects unknown or oversized advertised
+lengths before downloading, and oversized returned bytes afterward. The native
+library downloads into memory; this is not a streaming transport limit. Media
+payloads sent by helpers become downloadable only if the provider later supplies
+the corresponding media descriptor in an observed message.
+
+``request_history(chat_id, message_id, count)`` uses a retained message as the
+oldest known anchor; timestamps are converted to milliseconds for the native
+request. A returned ``requested`` status does not promise that the primary phone
+will send any history. Inspect later history events and synchronized messages.
+The command cannot discover unknown conversations or manufacture a missing anchor.
+Messages indexed by the early counting harness have no retained quote/media
+payload; those operations return a conflict until a payload is synchronized.
+Unusable send-result representations retained by the early prototype are also
+rejected as anchors instead of being sent back as provider message IDs.
+
+``get_group`` and ``get_group_members`` accept an exact group JID allowed by
+policy. Participant output is paginated after the provider returns its group
+snapshot. ``create_group(title, participants)`` requires explicitly named known
+individual JIDs with write grants. It does not add grants for the new group.
+``update_group_members`` accepts ``add``, ``remove``, ``promote`` or ``demote``;
+adding requires known individuals with write grants. Add/remove responses retain
+per-participant provider failures. A returned operation must not be interpreted
+as confirmation that every participant changed successfully.
+
+Account policy and audit
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Operation grants and chat grants are independent of avatar roles. For example:
+
+.. code-block:: json
+
+   {
+     "operations": ["get_contacts", "get_chats", "get_messages", "send_text"],
+     "chats": {
+       "*": ["read"],
+       "123@s.whatsapp.net": ["read", "write"],
+       "456@s.whatsapp.net": []
+     }
+   }
+
+``*`` in operations grants all operational commands. An exact chat entry replaces
+the wildcard. For provider-linked PN/LID aliases, every explicit entry must grant
+the operation; using another spelling cannot bypass a denial. Read, write and
+chat-administration grants are separate. Administrative policy commands use the
+``admin`` avatar role and remain available for recovery from an empty operation
+policy. Tool discovery reflects avatar roles; account policy can further deny a
+discovered tool at execution time.
+
+Policy changes are serialized with operations and saved in ``directory.db``.
+Saved policy takes precedence over constructor defaults on restart. Invalid
+policies leave existing grants unchanged. Audit records contain actor identity,
+operation, chat ID, time and outcome, without content or credentials. They record
+operations that reach the application; transport-level authorization failures
+are handled by kajenn. A timeout or cancellation after a mutation starts has an
+uncertain remote outcome. The application records it as unconfirmed and never
+retries automatically.
+
+Event subscriptions without polling
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Trusted Python integrations can subscribe while the event loop is running:
+
+.. code-block:: python
+
+   subscription = app.subscribe_events(
+       listener.on_account_event,
+       kinds=["message_received", "message_receipt", "disconnected"],
+   )
+   # During integration shutdown:
+   await app.unsubscribe_events(subscription)
+
+The listener is an async method receiving a dictionary with ``kind`` and relevant
+IDs. Available events are ``connected``, ``disconnected``, ``message_received``,
+``message_submitted``, ``message_receipt`` and ``history_received``. Message bodies
+and credentials are not included. Chat events are filtered against the current
+read policy when delivered. Each listener has a bounded 100-event queue and a
+five-second processing timeout. Drops and callback failures are exposed in
+``get_status``. Subscriptions are in-process, ephemeral and at-most-once, not a
+durable delivery queue or unsolicited MCP notifications to every client. A server
+integration can use its listener to drive its own notification mechanism.
 
 ``directory.db`` stores contacts, observed chat metadata and messages with private
 filesystem permissions, but without encryption. The session is held by one
@@ -142,7 +280,8 @@ Before publication
 Further live checks include transient network failure, sending to a designated
 test chat, graceful shutdown while receiving and phone-confirmed revocation.
 The offline suite does not perform those operations. Production integration also
-needs encryption and key ownership, retention and more granular policy.
+needs encryption and key ownership, retention, deployment packaging and
+end-to-end live validation of media, groups, receipts and history requests.
 A browser that owns its own session is a separate execution boundary; server MCP
 grants cannot constrain someone who owns the local device credentials.
 

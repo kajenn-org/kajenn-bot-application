@@ -15,6 +15,7 @@
 """Implementation tests for the synchronized WhatsApp directory."""
 
 from examples.whatsapp_account.directory import _Directory
+from examples.whatsapp_account.policy import _Policy
 
 
 def test_names_aliases_ambiguity_and_chat_separation(tmp_path):
@@ -52,3 +53,30 @@ def test_pages_literal_search_archived_and_reopen(tmp_path):
     assert messages["items"][0]["text"] == "Hello"
     assert path.stat().st_mode & 0o077 == 0
     reopened.close()
+
+
+
+def test_policy_and_lid_mapping_survive_restart_and_hide_denied_aliases(tmp_path):
+    path = tmp_path / "directory.db"
+    store = _Directory(path)
+    store.add_contact("123@s.whatsapp.net", "Person")
+    store.add_alias("123@s.whatsapp.net", "456@lid")
+    store.add_message("456@lid", "message", "456@lid", "private", 1, False)
+    policy = _Policy(store, {"operations": ["*"], "chats": {"*": ["read", "write"]}})
+    assert store.known_peer("456@lid")
+    policy.set_policy({"operations": ["*"], "chats": {"*": ["read", "write"], "123@s.whatsapp.net": []}})
+    store.close()
+    reopened = _Directory(path)
+    restored = _Policy(reopened, {"operations": ["*"], "chats": {"*": ["read", "write"]}})
+    assert not restored.allowed("456@lid", "read")
+    assert reopened.search_messages("private", None, 10, 0)["items"] == []
+    reopened.close()
+
+
+
+def test_omitted_policy_is_durable_deny_by_default(tmp_path):
+    store = _Directory(tmp_path / "directory.db")
+    policy = _Policy(store)
+    assert policy.value == {"operations": [], "chats": {}}
+    assert store.get_setting("policy") == policy.value
+    store.close()

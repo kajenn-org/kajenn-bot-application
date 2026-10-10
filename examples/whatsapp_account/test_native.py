@@ -15,14 +15,19 @@
 """Offline checks against the compiled Tryx extension; no client run loop starts."""
 
 import asyncio
+import base64
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from tryx.backend import SqliteStore
-from tryx.client import Tryx
+from tryx.client import Tryx, ChatActionsClient
 from tryx.types import JID
-from tryx.waproto.whatsapp_pb2 import HistorySync, SyncActionValue
+from tryx.events import ReceiptType
+from tryx.waproto.whatsapp_pb2 import HistorySync, SyncActionValue, Message
+
+from kajenn.exceptions import HTTPBadRequest, HTTPException
 
 from examples.whatsapp_account.connection import _Connection
 from examples.whatsapp_account.directory import _Directory
@@ -33,6 +38,8 @@ class TestNativeLifecycle:
         runtime = Tryx(SqliteStore(str(tmp_path / "session.db"), 0))
         client = runtime.get_client()
         assert callable(client.advanced.wait_for_client)
+        with pytest.raises(RuntimeError, match="not running"):
+            client.advanced.fetch_message_history(JID("1", "s.whatsapp.net"), "anchor", False, 1000, 5)
         for method in (client.advanced.disconnect, client.advanced.logout,
                        client.advanced.resync_directory):
             with pytest.raises(RuntimeError, match="not running"):
@@ -94,7 +101,7 @@ class TestNativeDirectory:
     async def test_send_builds_native_jid_and_records_submitted_message(self, tmp_path):
         connection = _Connection(tmp_path)
         connection.directory = _Directory(tmp_path / "directory.db")
-        sender = AsyncMock(return_value="submitted-id")
+        sender = AsyncMock(return_value=SimpleNamespace(message_id="submitted-id"))
         connection.session.client = SimpleNamespace(send_text=sender)
         try:
             await connection.send_text("123@s.whatsapp.net", "Test text")
@@ -106,3 +113,142 @@ class TestNativeDirectory:
                 "items"][0]["id"] == "submitted-id"
         finally:
             connection.directory.close()
+
+
+@pytest.fixture
+async def native_connection(tmp_path):
+    connection = _Connection(tmp_path)
+    connection.directory = _Directory(tmp_path / "directory.db")
+    connection.session.client = SimpleNamespace(
+        send_message=AsyncMock(return_value=SimpleNamespace(message_id="reply-id")),
+        send_photo=AsyncMock(return_value=SimpleNamespace(message_id="photo-id")),
+        send_document=AsyncMock(return_value=SimpleNamespace(message_id="doc-id")),
+        send_audio=AsyncMock(return_value=SimpleNamespace(message_id="audio-id")),
+        download_media=AsyncMock(return_value=b"file"),
+        advanced=SimpleNamespace(fetch_message_history=AsyncMock(return_value="history-request")),
+        chat_actions=SimpleNamespace(
+            react_message=AsyncMock(return_value="reaction-id"),
+            build_message_key=ChatActionsClient.build_message_key,
+            build_message_range=ChatActionsClient.build_message_range,
+            mark_chat_as_read=AsyncMock(), archive_chat=AsyncMock(), unarchive_chat=AsyncMock(),
+            mute_chat=AsyncMock(), unmute_chat=AsyncMock()),
+    )
+    yield connection
+    await connection.events.stop()
+    connection.directory.close()
+
+
+async def test_live_message_receipts_unread_and_duplicate_events(native_connection):
+    conn = native_connection
+    body = Message(conversation="hello")
+    info = SimpleNamespace(id="incoming", push_name="Test", timestamp=datetime.now(timezone.utc),
+        source=SimpleNamespace(chat=JID("1", "s.whatsapp.net"), sender=JID("1", "s.whatsapp.net"),
+                               is_from_me=False, sender_alt=None, recipient_alt=None))
+    event = SimpleNamespace(data=SimpleNamespace(message_info=info, raw_proto=body))
+    await conn.on_message(None, event)
+    conn.directory.set_chat_state("1@s.whatsapp.net", unread=False)
+    await conn.on_message(None, event)
+    assert conn.directory.get_unread(10, 0)["items"] == []
+    assert conn.directory.get_message("1@s.whatsapp.net", "incoming")["proto"] == body.SerializeToString()
+    for kind in (ReceiptType.Read, ReceiptType.Delivered, ReceiptType.Read):
+        receipt = SimpleNamespace(receipt_type=kind, source=info.source,
+                                  timestamp=info.timestamp, message_ids=["outgoing"])
+        await conn.on_receipt(None, receipt)
+    conn.record_sent(SimpleNamespace(message_id="outgoing"), "1@s.whatsapp.net", "sent")
+    status = conn.directory.get_message_status("1@s.whatsapp.net", "outgoing")
+    assert status["submission"] == "submitted"
+    assert {x["status"] for x in status["receipts"]} == {"read", "delivered"}
+    assert len(status["receipts"]) == 2
+
+
+async def test_reply_reaction_and_history_use_stored_message_identity(native_connection):
+    conn = native_connection
+    conn.directory.add_message("12@g.us", "anchor", "3@s.whatsapp.net", "old", 123, False)
+    conn.directory.set_message_data("12@g.us", "anchor", Message(conversation="old").SerializeToString())
+    reply = await conn.reply_message("12@g.us", "anchor", "answer")
+    jid, body = conn.session.client.send_message.call_args.args
+    context = body.extendedTextMessage.contextInfo
+    assert (jid.user, jid.server) == ("12", "g.us")
+    assert context.stanzaId == "anchor" and context.participant == "3@s.whatsapp.net"
+    assert context.quotedMessage.conversation == "old"
+    assert reply["id"] == "reply-id"
+    await conn.react_message("12@g.us", "anchor", "👍")
+    args = conn.session.client.chat_actions.react_message.call_args.args
+    assert args[1:4] == ("anchor", "👍", False)
+    assert args[4].user == "3"
+    result = await conn.request_history("12@g.us", "anchor", 50)
+    args = conn.session.client.advanced.fetch_message_history.call_args.args
+    assert args[1:] == ("anchor", False, 123000, 50)
+    assert result["status"] == "requested"
+    with pytest.raises(HTTPBadRequest):
+        await conn.reply_message("12@g.us", "unknown", "answer")
+
+
+@pytest.mark.parametrize("kind,method", [("image", "send_photo"), ("document", "send_document"),
+                                        ("audio", "send_audio")])
+async def test_supplied_media_bytes_are_sent_without_opening_paths(native_connection, kind, method):
+    conn = native_connection
+    result = await conn.send_media("1@s.whatsapp.net", kind, b"file", "test/type", "name", "")
+    assert result["status"] == "submitted"
+    assert getattr(conn.session.client, method).call_args.args[1] == b"file"
+    assert conn.directory.get_message("1@s.whatsapp.net", result["id"])["kind"] == kind
+
+
+async def test_media_download_rejects_unbounded_size_before_network(native_connection):
+    conn = native_connection
+    body = Message()
+    body.documentMessage.fileLength = 4
+    body.documentMessage.mimetype = "application/pdf"
+    conn.directory.add_message("1@s.whatsapp.net", "media", "sender", None, 1, False)
+    conn.directory.set_message_data("1@s.whatsapp.net", "media", body.SerializeToString(), "document")
+    result = await conn.download_media("1@s.whatsapp.net", "media", 10)
+    assert base64.b64decode(result["content_base64"]) == b"file"
+    conn.session.client.download_media.reset_mock()
+    with pytest.raises(HTTPBadRequest):
+        await conn.download_media("1@s.whatsapp.net", "media", 3)
+    conn.session.client.download_media.assert_not_awaited()
+
+
+@pytest.mark.parametrize("operation,value,method", [
+    ("mark_read", True, "mark_chat_as_read"), ("archive_chat", True, "archive_chat"),
+    ("archive_chat", False, "unarchive_chat"), ("mute_chat", True, "mute_chat"),
+    ("mute_chat", False, "unmute_chat")])
+async def test_chat_actions_build_real_proto_ranges(native_connection, operation, value, method):
+    conn = native_connection
+    conn.directory.add_message("1@s.whatsapp.net", "anchor", "1@s.whatsapp.net", "text", 10, False)
+    await conn.set_chat_flag(operation, "1@s.whatsapp.net", value)
+    getattr(conn.session.client.chat_actions, method).assert_awaited_once()
+    if operation == "mark_read":
+        message_range = conn.session.client.chat_actions.mark_chat_as_read.call_args.args[2]
+        assert message_range.lastMessageTimestamp == 10
+
+
+async def test_group_results_preserve_partial_failures(native_connection):
+    conn = native_connection
+    group = SimpleNamespace(id=JID("12", "g.us"), subject="Group", description="Description",
+                            size=2, is_locked=False, is_announcement=False,
+                            participants=[SimpleNamespace(jid=JID("1", "s.whatsapp.net"), is_admin=True),
+                                          SimpleNamespace(jid=JID("2", "s.whatsapp.net"), is_admin=False)])
+    conn.session.client.groups = SimpleNamespace(
+        get_metadata=AsyncMock(return_value=group),
+        create_group=AsyncMock(return_value=SimpleNamespace(gid=group.id)),
+        add_participants=AsyncMock(return_value=[SimpleNamespace(jid=JID("1", "s.whatsapp.net"),
+                                                               status="403", error="forbidden")]),
+        remove_participants=AsyncMock(), promote_participants=AsyncMock(), demote_participants=AsyncMock())
+    assert (await conn.get_group("12@g.us"))["title"] == "Group"
+    page = await conn.get_group_members("12@g.us", 1, 0)
+    assert page["next_offset"] == 1 and page["items"][0]["admin"]
+    created = await conn.create_group("Group", ["1@s.whatsapp.net"])
+    assert created["chat_id"] == "12@g.us" and not created["policy_changed"]
+    result = await conn.update_group_members("12@g.us", ["1@s.whatsapp.net"], "add")
+    assert result["results"][0]["error"] == "forbidden"
+
+
+async def test_legacy_probe_ids_are_not_sent_back_to_the_provider(native_connection):
+    conn = native_connection
+    invalid_id = "<builtins.SendResult object at 0x123>"
+    conn.directory.add_message("1@s.whatsapp.net", invalid_id, "self", "old", 1, True)
+    with pytest.raises(HTTPException) as error:
+        await conn.react_message("1@s.whatsapp.net", invalid_id, "👍")
+    assert error.value.status == 409
+    conn.session.client.chat_actions.react_message.assert_not_awaited()

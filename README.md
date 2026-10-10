@@ -50,6 +50,18 @@ local and policy management is restricted to an administrator.
 See the [personal account guide](docs/guides/telegram-account.md). Personal account
 access and REST/MCP bot administration are included in the **0.2.0b1 beta**.
 
+## Personal WhatsApp account prototype
+
+The source-tree `examples/whatsapp_account` application exposes 25 authenticated
+REST/MCP tools for contacts, synchronized messages, replies, media, chat state,
+groups, policy and audit. It includes provider receipts and in-process event
+subscriptions without polling. It uses a pinned, locally patched Tryx build and
+is **not included in the published wheel**. Device and directory storage use
+private filesystem permissions, without encryption at rest.
+
+See the [prototype guide](docs/guides/whatsapp-account-prototype.rst) for setup,
+command contracts, permission rules and history coverage limits.
+
 ## Install
 
 Python **3.11–3.14** is tested. `kajenn>=0.4.1` is installed as a dependency.
@@ -123,9 +135,9 @@ the known customer service window.
 
 ## Scope and delivery guarantees
 
-This package uses official bot/business APIs. It does not provide personal-account
-sessions, group history imports, automatic application-user provisioning, or a
-public bot-management API. Admission does not grant kajenn router permissions.
+The bot applications use official bot/business APIs. Personal-account access is
+a separate application surface with its own permissions and history limitations.
+Admission does not provision application users or grant kajenn router permissions.
 
 The filesystem examples support **one receiving process per registry**. Webhook
 acknowledgement means work has been staged, not that a reply was delivered.

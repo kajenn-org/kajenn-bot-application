@@ -19,6 +19,7 @@ ambiguous names and distinguish address-book names from profile push names.
 The index is a synchronized subset, not a promise of complete remote history.
 """
 
+import json
 import os
 import sqlite3
 import time
@@ -34,6 +35,7 @@ class _Directory:
         self.database = sqlite3.connect(path)
         self.database.row_factory = sqlite3.Row
         self.database.create_function("fold", 1, self.normalize, deterministic=True)
+        self.database.create_function("readable", 1, self.allow_read)
         self.database.executescript("""
             CREATE TABLE IF NOT EXISTS contacts (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL, pn TEXT NOT NULL,
@@ -45,13 +47,31 @@ class _Directory:
                 chat_id TEXT NOT NULL, id TEXT NOT NULL, sender TEXT NOT NULL,
                 text TEXT, timestamp INTEGER NOT NULL, from_me INTEGER NOT NULL,
                 PRIMARY KEY(chat_id,id));
+            CREATE TABLE IF NOT EXISTS aliases (pn TEXT, lid TEXT, PRIMARY KEY(pn,lid));
+            CREATE TABLE IF NOT EXISTS message_data (
+                chat_id TEXT, id TEXT, proto BLOB, kind TEXT, status TEXT,
+                PRIMARY KEY(chat_id,id));
+            CREATE TABLE IF NOT EXISTS receipts (
+                chat_id TEXT, id TEXT, sender TEXT, status TEXT, timestamp INTEGER,
+                PRIMARY KEY(chat_id,id,sender,status));
+            CREATE TABLE IF NOT EXISTS chat_state (
+                id TEXT PRIMARY KEY, unread INTEGER, muted INTEGER);
+            CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS audit (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT, timestamp REAL, actor TEXT,
+                operation TEXT, chat_id TEXT, outcome TEXT);
             CREATE INDEX IF NOT EXISTS message_pages ON messages(chat_id,timestamp,id);
         """)
+
+    def allow_read(self, jid):
+        return True
 
     def normalize(self, value):
         return " ".join(unicodedata.normalize("NFKC", value or "").casefold().split())
 
     def add_contact(self, jid, name, *, pn="", lid="", source="address_book"):
+        if pn and lid:
+            self.add_alias(pn, lid)
         if not jid or not name:
             return
         existing = self.database.execute(
@@ -102,7 +122,7 @@ class _Directory:
 
     def get_contacts(self, query, limit, offset):
         rows = self.database.execute("""
-            SELECT * FROM contacts WHERE instr(fold(name),?) > 0
+            SELECT * FROM contacts WHERE readable(id) AND instr(fold(name),?) > 0
             ORDER BY fold(name),id LIMIT ? OFFSET ?
         """, (self.normalize(query), limit + 1, offset)).fetchall()
         return self.get_page(rows, limit, offset)
@@ -112,7 +132,7 @@ class _Directory:
             SELECT h.id,COALESCE(NULLIF(c.name,''),h.name) AS name,h.archived,
                    h.source,h.last_timestamp
             FROM chats h LEFT JOIN contacts c ON (h.id=c.id OR h.id=c.pn OR h.id=c.lid)
-            WHERE (? OR h.archived IS NULL OR h.archived=0)
+            WHERE readable(h.id) AND (? OR h.archived IS NULL OR h.archived=0)
               AND instr(fold(COALESCE(NULLIF(c.name,''),h.name)),?) > 0
             ORDER BY h.last_timestamp DESC,h.id LIMIT ? OFFSET ?
         """, (include_archived, self.normalize(query), limit + 1, offset)).fetchall()
@@ -120,23 +140,136 @@ class _Directory:
 
     def get_messages(self, chat_id, limit, offset):
         rows = self.database.execute("""
-            SELECT * FROM messages WHERE chat_id=? ORDER BY timestamp DESC,id DESC
+            SELECT m.*,d.kind,d.status FROM messages m LEFT JOIN message_data d
+            ON m.chat_id=d.chat_id AND m.id=d.id
+            WHERE m.chat_id IN (SELECT value FROM json_each(?))
+            AND readable(m.chat_id) ORDER BY m.timestamp DESC,m.id DESC
             LIMIT ? OFFSET ?
-        """, (chat_id, limit + 1, offset)).fetchall()
+        """, (json.dumps(self.get_aliases(chat_id)), limit + 1, offset)).fetchall()
         return self.get_page(rows, limit, offset)
 
     def known_peer(self, jid):
         if not jid:
             return False
         return self.database.execute("""
-            SELECT id FROM contacts WHERE id=? OR pn=? OR lid=?
-            UNION SELECT id FROM chats WHERE id=? LIMIT 1
-        """, (jid, jid, jid, jid)).fetchone() is not None
+            SELECT id FROM contacts WHERE id IN (SELECT value FROM json_each(?))
+            UNION SELECT id FROM chats WHERE id IN (SELECT value FROM json_each(?)) LIMIT 1
+        """, (json.dumps(self.get_aliases(jid)), json.dumps(self.get_aliases(jid)))).fetchone() is not None
 
     @property
     def counts(self):
-        return {name: self.database.execute(f"SELECT count(*) FROM {name}").fetchone()[0]
+        return {name: self.database.execute(f"SELECT count(*) FROM {name} WHERE readable({'chat_id' if name == 'messages' else 'id'})").fetchone()[0]
                 for name in ("contacts", "chats", "messages")}
 
     def close(self):
         self.database.close()
+
+
+    def add_alias(self, pn, lid):
+        if not pn.endswith("@s.whatsapp.net") or not lid.endswith("@lid"):
+            return
+        with self.database:
+            self.database.execute("INSERT OR IGNORE INTO aliases VALUES(?,?)", (pn, lid))
+
+    def get_aliases(self, jid):
+        found = {jid}
+        pending = [jid]
+        while pending:
+            item = pending.pop()
+            rows = self.database.execute(
+                "SELECT id,pn,lid FROM contacts WHERE id=? OR pn=? OR lid=?",
+                (item, item, item)).fetchall()
+            pairs = self.database.execute("SELECT pn,lid FROM aliases WHERE pn=? OR lid=?",
+                                          (item, item)).fetchall()
+            for row in [*rows, *pairs]:
+                for value in row:
+                    if value and value not in found:
+                        found.add(value)
+                        pending.append(value)
+        return [jid, *sorted(found - {jid})]
+
+    def get_setting(self, name):
+        row = self.database.execute("SELECT value FROM settings WHERE name=?", (name,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def set_setting(self, name, value):
+        with self.database:
+            self.database.execute("INSERT OR REPLACE INTO settings VALUES(?,?)",
+                                  (name, json.dumps(value)))
+
+    def add_audit(self, actor, operation, chat_id, outcome):
+        with self.database:
+            self.database.execute(
+                "INSERT INTO audit(timestamp,actor,operation,chat_id,outcome) VALUES(?,?,?,?,?)",
+                (time.time(), actor, operation, chat_id, outcome))
+
+    def get_audit_log(self, limit, offset):
+        rows = self.database.execute("SELECT * FROM audit ORDER BY seq DESC LIMIT ? OFFSET ?",
+                                     (limit + 1, offset)).fetchall()
+        return self.get_page(rows, limit, offset)
+
+    def set_chat_state(self, jid, *, unread=None, muted=None):
+        self.add_chat(jid, source="app_state")
+        with self.database:
+            self.database.execute("""
+                INSERT INTO chat_state VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET
+                unread=COALESCE(excluded.unread,chat_state.unread),
+                muted=COALESCE(excluded.muted,chat_state.muted)
+            """, (jid, unread, muted))
+
+    def get_chat(self, jid):
+        rows = self.database.execute("""
+            SELECT h.*,s.unread,s.muted FROM chats h LEFT JOIN chat_state s ON h.id=s.id
+            WHERE h.id IN (SELECT value FROM json_each(?)) AND readable(h.id)
+        """, (json.dumps(self.get_aliases(jid)),)).fetchall()
+        return {"items": [dict(r) for r in rows], "coverage": "observed_and_synchronized_subset"}
+
+    def get_unread(self, limit, offset):
+        rows = self.database.execute("""
+            SELECT h.* FROM chats h JOIN chat_state s ON h.id=s.id
+            WHERE s.unread=1 AND readable(h.id)
+            ORDER BY h.last_timestamp DESC,h.id LIMIT ? OFFSET ?
+        """, (limit + 1, offset)).fetchall()
+        return self.get_page(rows, limit, offset)
+
+    def search_messages(self, query, chat_id, limit, offset):
+        rows = self.database.execute("""
+            SELECT * FROM messages WHERE readable(chat_id) AND instr(fold(text),?) > 0
+            AND (? IS NULL OR chat_id IN (SELECT value FROM json_each(?)))
+            ORDER BY timestamp DESC,chat_id,id LIMIT ? OFFSET ?
+        """, (self.normalize(query), chat_id, json.dumps(self.get_aliases(chat_id)) if chat_id
+              else "[]", limit + 1, offset)).fetchall()
+        return self.get_page(rows, limit, offset)
+
+    def get_message(self, chat_id, message_id):
+        rows = self.database.execute("""
+            SELECT m.*,d.proto,d.kind,d.status FROM messages m LEFT JOIN message_data d
+            ON m.chat_id=d.chat_id AND m.id=d.id
+            WHERE m.chat_id IN (SELECT value FROM json_each(?)) AND m.id=?
+        """, (json.dumps(self.get_aliases(chat_id)), message_id)).fetchall()
+        return dict(rows[0]) if rows else None
+
+    def set_message_data(self, chat_id, message_id, proto=None, kind="text", status="received"):
+        with self.database:
+            self.database.execute("""
+                INSERT INTO message_data VALUES(?,?,?,?,?) ON CONFLICT(chat_id,id) DO UPDATE SET
+                proto=COALESCE(excluded.proto,message_data.proto), kind=excluded.kind,
+                status=CASE WHEN message_data.status='submitted' THEN 'submitted'
+                            ELSE excluded.status END
+            """, (chat_id, message_id, proto, kind, status))
+
+    def add_receipt(self, chat_id, message_id, sender, status, timestamp):
+        with self.database:
+            self.database.execute("INSERT OR REPLACE INTO receipts VALUES(?,?,?,?,?)",
+                                  (chat_id, message_id, sender, status, timestamp))
+
+    def get_message_status(self, chat_id, message_id):
+        message = self.get_message(chat_id, message_id)
+        rows = self.database.execute("""
+            SELECT sender,status,timestamp FROM receipts
+            WHERE chat_id IN (SELECT value FROM json_each(?)) AND id=? ORDER BY timestamp
+        """, (json.dumps(self.get_aliases(chat_id)), message_id)).fetchall()
+        return {"id": message_id, "chat_id": chat_id,
+                "submission": message["status"] if message else None,
+                "receipts": [dict(row) for row in rows],
+                "coverage": "observed_receipts_not_all_group_members"}

@@ -1,4 +1,4 @@
 maturin>=1.12,<2
 segno>=1.6.6
-# Install the local tryx-1.5.0+kajenn.3 wheel after building it.
+# Install the local tryx-1.5.0+kajenn.4 wheel after building it.
 uvicorn>=0.30

@@ -48,6 +48,7 @@ class _Builder:
         self.execute("git", "apply", str(self.resources / "tryx-directory.patch"))
         self.execute("git", "apply", str(self.resources / "tryx-protobuf.patch"))
         self.execute("git", "apply", str(self.resources / "tryx-archive.patch"))
+        self.execute("git", "apply", str(self.resources / "tryx-history.patch"))
         shutil.copyfile(self.resources / "tryx.Cargo.lock", self.directory / "Cargo.lock")
         environment = dict(os.environ, RUSTUP_TOOLCHAIN=self.upstream["rust_toolchain"])
         subprocess.run(
