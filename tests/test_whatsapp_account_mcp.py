@@ -15,6 +15,7 @@
 """Contract: authenticated MCP directory access and exact-recipient sending."""
 
 import asyncio
+from types import SimpleNamespace
 import time
 from unittest.mock import AsyncMock
 
@@ -22,7 +23,7 @@ import httpx
 import pytest
 from genro_routes import route
 from kajenn import AsgiServer, RoutedApplication
-from kajenn.exceptions import HTTPBadRequest, HTTPUnauthorized, HTTPForbidden
+from kajenn.exceptions import HTTPException, HTTPBadRequest, HTTPUnauthorized, HTTPForbidden
 
 from examples.whatsapp_account.application import WhatsAppAccountApplication
 from examples.whatsapp_account.directory import _Directory
@@ -99,7 +100,7 @@ async def test_mcp_discovery_filters_avatar_and_hides_pairing(account):
     app, connection, http = account
     calls = Calls(http)
     names = {t["name"] for t in (await calls.tools("owner")).json()["result"]["tools"]}
-    assert names == {"decide_group_requests", "link_community_groups", "get_community_groups", "get_channels", "vote_poll", "respond_group_event", "get_poll_results", "get_events", "schedule_message", "get_outbox", "decide_message", "revoke_message", "delete_message", "get_channel_messages", "react_channel_message", "create_poll", "create_group_event", "create_community", "deactivate_community", "get_group_requests", "get_status", "get_sync_status", "get_contacts", "get_chats", "get_chat",
+    assert names == {"transcribe_message", "decide_group_requests", "link_community_groups", "get_community_groups", "get_channels", "vote_poll", "respond_group_event", "get_poll_results", "get_events", "schedule_message", "get_outbox", "decide_message", "revoke_message", "delete_message", "get_channel_messages", "react_channel_message", "create_poll", "create_group_event", "create_community", "deactivate_community", "get_group_requests", "get_status", "get_sync_status", "get_contacts", "get_chats", "get_chat",
                      "get_messages", "get_message_status", "get_unread", "search_messages",
                      "send_text", "reply_message", "react_message", "send_media", "download_media",
                      "mark_read", "archive_chat", "mute_chat", "get_group", "get_group_members",
@@ -401,3 +402,36 @@ async def test_newsletter_is_not_a_group_participant_or_text_chat(account):
         app.validate_participants(["1@newsletter"])
     with pytest.raises(HTTPBadRequest):
         await app.send_text("1@newsletter", "Wrong transport")
+
+
+async def test_transcription_contract_audio_result_and_no_persistence(account):
+    app, connection, http = account
+    connection.directory.set_message_data("11@s.whatsapp.net", "m1", kind="audio")
+    connection.download_media = AsyncMock(return_value={"content_base64": "YXVkaW8=", "mimetype": "audio/ogg"})
+    engine = AsyncMock(return_value={"text": "Buongiorno", "language": "it", "duration": 2})
+    app.transcriber = SimpleNamespace(transcribe=engine)
+    result = await Calls(http).call("transcribe_message", {"chat_id": "11@s.whatsapp.net", "message_id": "m1"})
+    assert result.json()["result"]["structuredContent"]["text"] == "Buongiorno"
+    engine.assert_awaited_once_with(b"audio", "audio/ogg", "it")
+    assert connection.directory.get_message("11@s.whatsapp.net", "m1")["text"] == "Hello"
+    assert "Buongiorno" not in str(connection.directory.get_audit_log(100, 0))
+    assert connection.sent == []
+
+
+async def test_transcription_denied_unconfigured_and_non_audio_do_not_download(account):
+    app, connection, http = account
+    connection.download_media = AsyncMock()
+    with pytest.raises(HTTPException) as error:
+        await app.transcribe_message("11@s.whatsapp.net", "m1")
+    assert error.value.status == 503
+    app.transcriber = SimpleNamespace(transcribe=AsyncMock())
+    with pytest.raises(HTTPBadRequest):
+        await app.transcribe_message("11@s.whatsapp.net", "m1")
+    with pytest.raises(HTTPBadRequest):
+        await app.transcribe_message("11@s.whatsapp.net", "m1", "../it")
+    connection.directory.add_alias("11@s.whatsapp.net", "99@lid")
+    await app.set_policy({"operations": ["*"], "chats": {"*": ["read"], "99@lid": []}})
+    with pytest.raises(HTTPForbidden):
+        await app.transcribe_message("11@s.whatsapp.net", "m1")
+    connection.download_media.assert_not_awaited()
+    app.transcriber.transcribe.assert_not_awaited()

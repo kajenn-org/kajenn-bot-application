@@ -31,6 +31,7 @@ from kajenn.response import Response
 
 from examples.whatsapp_account.application import WhatsAppAccountApplication
 from examples.whatsapp_account.connection import _Connection
+from examples.whatsapp_account.transcription import _LocalTranscriber
 
 
 class _Identity(RoutedApplication):
@@ -63,6 +64,8 @@ class _Server:
         accounts = json.loads(config.read_text()) if config else {"whatsapp": str(self.arguments.session_dir)}
         if not isinstance(accounts, dict) or not 1 <= len(accounts) <= 20:
             raise ValueError("accounts must map one to twenty mount names to private session directories")
+        model = getattr(self.arguments, "transcription_model", None)
+        transcriber = _LocalTranscriber(model) if model else None
         mounts = []
         used = set()
         for code, path in accounts.items():
@@ -75,7 +78,7 @@ class _Server:
                 raise ValueError("Each account requires a separate session directory")
             used.add(directory.resolve())
             mounts.append((WhatsAppAccountApplication,
-                           {"code": code, "connection_factory": partial(_Connection, directory, self.arguments.resync),
+                           {"code": code, "transcriber": transcriber, "connection_factory": partial(_Connection, directory, self.arguments.resync),
                             "policy": {"operations": ["*"], "chats": {"*": ["read", "write", "admin"]}}}))
         return mounts
 
@@ -110,6 +113,7 @@ def main():
     parser.add_argument("--session-dir", type=Path, required=True)
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--accounts", type=Path, help="JSON mapping mount names to separate session directories; one shared owner")
+    parser.add_argument("--transcription-model", type=Path, help="Local faster-whisper model directory; no model downloads")
     parser.add_argument("--resync", action="store_true", help="Replay app-state directory metadata")
     _Server(parser.parse_args()).run()
 

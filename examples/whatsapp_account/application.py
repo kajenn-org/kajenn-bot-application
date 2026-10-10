@@ -19,6 +19,7 @@ import base64
 import binascii
 import copy
 import inspect
+import re
 import time
 from contextvars import ContextVar
 
@@ -35,9 +36,10 @@ MEDIA_LIMIT = 5 * 1024 * 1024
 
 
 class WhatsAppAccountApplication(_ExtendedCommands, McpOpenApiApplication):
-    def __init__(self, *, connection_factory, policy=None, **kwargs):
+    def __init__(self, *, connection_factory, policy=None, transcriber=None, **kwargs):
         self.connection = connection_factory()
         self.initial_policy = policy
+        self.transcriber = transcriber
         self.access = None
         self.outbox = None
         self.lock = asyncio.Lock()
@@ -88,7 +90,7 @@ class WhatsAppAccountApplication(_ExtendedCommands, McpOpenApiApplication):
                 "callback_failures": getattr(self.connection, "callback_failures", {}),
                 "event_delivery": getattr(self.connection, "event_status", {})}
 
-    async def run_operation(self, operation, chat_id, handler, *args, remote=False):
+    async def run_operation(self, operation, chat_id, handler, *args, remote=False, timeout=45):
         async with self.lock:
             store = self.connection.directory
             try:
@@ -100,7 +102,7 @@ class WhatsAppAccountApplication(_ExtendedCommands, McpOpenApiApplication):
                 raise HTTPException(503, detail="WhatsApp is disconnected")
             store.add_audit(self.actor, operation, chat_id, "started")
             try:
-                async with asyncio.timeout(45):
+                async with asyncio.timeout(timeout):
                     result = handler(*args)
                     if inspect.isawaitable(result):
                         result = await result
@@ -367,3 +369,21 @@ class WhatsAppAccountApplication(_ExtendedCommands, McpOpenApiApplication):
             raise HTTPBadRequest("after_id must be a nonnegative bounded cursor")
         return await self.run_operation("get_events", None, self.connection.directory.get_events,
                                         after_id, limit)
+
+    async def transcribe_message(self, chat_id, message_id, language="it"):
+        self.validate_message(chat_id, message_id)
+        if not isinstance(language, str) or not re.fullmatch(r"(?:auto|[a-z]{2,3})", language):
+            raise HTTPBadRequest("language must be a lowercase language code or auto")
+        return await self.run_operation("transcribe_message", chat_id, self.transcribe_audio,
+                                        chat_id, message_id, language, remote=True, timeout=180)
+
+    async def transcribe_audio(self, chat_id, message_id, language):
+        if self.transcriber is None:
+            raise HTTPException(503, detail="No transcription engine is configured")
+        row = self.connection.directory.get_message(chat_id, message_id)
+        if row is None or row["kind"] not in ("audio", "voice"):
+            raise HTTPBadRequest("The selected message must contain retained audio")
+        media = await self.connection.download_media(chat_id, message_id, MEDIA_LIMIT)
+        content = base64.b64decode(media["content_base64"], validate=True)
+        result = await self.transcriber.transcribe(content, media["mimetype"], language)
+        return {"chat_id": chat_id, "message_id": message_id, **result}

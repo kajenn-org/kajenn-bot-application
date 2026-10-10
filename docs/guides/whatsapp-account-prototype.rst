@@ -119,7 +119,7 @@ Commands and roles
 Kajenn filters MCP discovery and execution by avatar roles. All commands are also
 available on the application's REST routing surface. The application additionally
 checks its persistent operation and chat policy on execution, including calls
-from trusted Python code. There are 75 MCP tools. The original command families are:
+from trusted Python code. There are 76 MCP tools. The original command families are:
 
 .. list-table:: Account commands
    :header-rows: 1
@@ -508,6 +508,9 @@ be used as group participants or ordinary text-chat targets.
    * - ``star_message``
      - ``whatsapp_account_write``
      - Star or unstar an observed message.
+   * - ``transcribe_message``
+     - ``whatsapp_account_read``
+     - Transcribe retained audio with the configured engine; no automatic sends.
    * - ``update_channel``
      - ``whatsapp_account_manage``
      - Change newsletter channel title and description.
@@ -665,3 +668,38 @@ References
 * `whatsapp-rust <https://github.com/oxidezap/whatsapp-rust>`_
 * `baileyrs <https://github.com/oxidezap/baileyrs>`_
 * `Oxidezap browser storage <https://github.com/oxidezap/client/blob/main/crates/session/src/store/web.rs>`_
+
+On-demand voice transcription
+-----------------------------
+
+``transcribe_message(chat_id, message_id, language="it")`` transcribes retained
+voice notes and audio messages. Use ``language="auto"`` for language detection.
+The command requires the ``whatsapp_account_read`` avatar role, the independent
+``transcribe_message`` operation grant and a read grant for the chat. Message
+text, transcripts and audio are not added to audit records. Transcripts are
+returned only; they are neither persisted nor sent as WhatsApp replies.
+
+The default has no speech engine and returns 503 before downloading audio.
+For local recognition, install ``faster-whisper`` in the server's Python
+environment and obtain a compatible CTranslate2 model directory explicitly.
+Start the server with ``--transcription-model /absolute/path/to/model``.
+The model must already exist locally: the worker sets offline mode and uses
+``local_files_only=True``. No hosted transcription service is selected implicitly.
+See the `faster-whisper documentation <https://github.com/SYSTRAN/faster-whisper>`_
+for compatible models and installation requirements.
+
+Audio is downloaded from WhatsApp under the existing 5 MiB limit. A subprocess
+receives it through stdin and decodes it in memory. Recognition is limited to
+five minutes of decoded audio, 20,000 transcript characters and a 170-second
+worker timeout (180 seconds for the complete operation). Audio decoding occurs
+before the duration check. CPU inference uses two threads; a model is loaded for
+each request. Cancellation terminates and reaps the worker. The account's normal
+operation lock remains held during transcription. No automatic transcription or
+background monitoring is enabled.
+
+Applications can instead inject a trusted object implementing
+``async transcribe(content: bytes, mimetype: str, language: str) -> dict`` through
+the ``transcriber`` constructor argument. It returns ``text``, ``language`` and
+optional engine metadata. An external provider must be explicitly configured by
+the deployer, who determines where audio is sent. The MCP caller cannot select
+an endpoint, executable, model path or credentials.

@@ -26,6 +26,7 @@ from kajenn.exceptions import HTTPBadRequest, HTTPForbidden
 
 
 OPERATIONS = {
+    "transcribe_message": "read",
     "decide_group_requests": "admin", "link_community_groups": "admin",
     "get_community_groups": "read", "get_channels": None,
     "vote_poll": "write", "respond_group_event": "write", "get_poll_results": "read",

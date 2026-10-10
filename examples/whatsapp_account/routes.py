@@ -175,3 +175,8 @@ class _Operations(_ExtendedRoutes):
     async def get_events(self, after_id: int = 0, limit: int = 50) -> dict:
         """Replay permitted event identifiers from the bounded persistent journal."""
         return await self.application.get_events(after_id, limit)
+
+    @route(channel_channels="mcp,rest", auth_rule="whatsapp_account_read", openapi_method="post")
+    async def transcribe_message(self, chat_id: str, message_id: str, language: str = "it") -> dict:
+        """Transcribe retained audio on request using the configured engine; no automatic sends."""
+        return await self.application.transcribe_message(chat_id, message_id, language)
