@@ -43,6 +43,7 @@ interchangeable.
    guides/telegram
    guides/telegram-account
    guides/whatsapp
+   guides/whatsapp-account-prototype
    guides/persistence
    guides/administration
    guides/operations
