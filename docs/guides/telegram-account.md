@@ -1,12 +1,13 @@
 # Personal Telegram account
 
-**Document version:** 0.2 · **Last updated:** 2026-10-09 · **Status:** 🔴 UNDER REVIEW
+**Document version:** 0.3 · **Last updated:** 2026-10-10 · **Status:** 🔴 UNDER REVIEW
 
 `TelegramAccountApplication` connects one personal Telegram account through
 MTProto. It is a separate application in the same distribution as the Telegram
 and WhatsApp bots. It does not inherit bot registration, webhook processing or
 bot conversations. Multiple accounts require separate mounts, state files and
-keys. This application is included in the `0.2.0b1` beta release.
+keys. The base application is included in `0.2.0b1`. This source checkout extends it to
+32 operational MCP tools; the additions below are not yet published on PyPI.
 
 Use it for a local developer service: an authenticated MCP client can read a
 permitted group's history, send a message, or create and administer a channel
@@ -18,7 +19,8 @@ using a personal session does not override Telegram's sender presentation.
 
 Install the beta with `python -m pip install "kajenn-bot-application==0.2.0b1"`.
 To use the enrollment and configuration examples below, clone the repository,
-switch to tag `v0.2.0b1`, and install it with `python -m pip install .`.
+use the current source checkout for the expanded commands, and install it with
+`python -m pip install .`. Tag `v0.2.0b1` contains the original command set.
 The examples are included in the source checkout, not the installed wheel.
 The package includes Telethon, cryptography and filelock; kajenn 0.4.1 or newer
 provides authenticated REST/MCP discovery. There is no webhook or polling loop:
@@ -174,7 +176,7 @@ curl --fail-with-body http://127.0.0.1:8000/personal/_admin/set_policy \
 For `/get_policy` and `/revoke_session`, send `{}`. A policy change is saved before
 it becomes active. It is serialized with ongoing operations and cannot undo an
 operation already sent to Telegram. Provider operations run one at a time, with
-a 45-second timeout per operation; this keeps policy changes, logout and message
+a 45-second timeout per operation (180 seconds for transcription); this keeps policy changes, logout and message
 mutations ordered. Status and policy reads do not join that queue. The encrypted
 file is written and synchronized only when the session, identity or policy
 changes, not after every history read.
@@ -225,7 +227,7 @@ Send JSON-RPC to `/personal/_mcp` with the operator Bearer token:
       "chat_id": -1001234567890,
       "limit": 100,
       "since": "2026-10-01T00:00:00Z",
-      "until": "2026-10-09T00:00:00Z"
+      "until": "2026-10-10T00:00:00Z"
     }
   }
 }
@@ -281,3 +283,96 @@ credential isolation, paging, revocation and error handling. Before production,
 perform an owner-controlled smoke test: local login, inspect the new device,
 read a permitted test chat, send one approved message, and revoke the device.
 No live account is required by the automated suite.
+
+## Expanded account commands
+
+The account exposes 32 operational MCP tools. These eighteen additions use the
+same `telegram_account` avatar role and independently checked operation policy.
+They are account operations, not Telegram Bot API commands.
+
+| Command | Chat grant | Contract |
+|---|---|---|
+| `download_media` | read | Download selected media as bytes, bounded to 5 MiB. |
+| `transcribe_message` | read | Transcribe selected audio with the configured engine; no automatic reply. |
+| `react_message` | write | Set an emoji reaction, or remove it with an empty string. |
+| `mark_read` | write | Mark messages read up to the selected message. |
+| `archive_chat` | write | Archive or unarchive a chat. |
+| `mute_chat` | write | Mute a chat until 2038 or restore notifications. |
+| `pin_message` | admin | Pin or unpin a message without a notification. |
+| `block_contact` | admin | Block or unblock a personal Telegram contact. |
+| `set_profile` | Account-wide | Set account name and about text; empty optional fields clear them. |
+| `get_contacts` | Account-wide | List readable contacts with policy filtering before pagination. |
+| `forward_message` | write | Forward one message; requires source history permission and destination write permission. |
+| `schedule_message` | write | Schedule text on Telegram using an ISO 8601 date with timezone. |
+| `get_scheduled_messages` | read | Read messages scheduled on Telegram for this chat. |
+| `cancel_scheduled_message` | write | Cancel an outgoing scheduled message by its scheduled-message ID. |
+| `create_poll` | write | Create an anonymous poll with two to ten options. |
+| `get_poll` | read | Read poll choices and provider results; unknown counts remain null. |
+| `vote_poll` | write | Vote using option indexes from get_poll; an empty list retracts your vote. |
+| `send_media` | write | Send photo, video, audio, voice or sticker bytes; never read server paths. |
+
+### Media and local transcription
+
+`send_media` accepts `photo`, `video`, `audio`, `voice` and `sticker`. Supply
+base64 bytes and a simple filename with a compatible extension; the application
+does not transcode formats or read arbitrary paths. Stickers carry an explicit
+Telegram sticker attribute. Media must fit within 5 MiB. Download validates both
+the advertised length and the received byte count before returning content.
+
+`transcribe_message(chat_id, message_id, language="it")` requires an audio or
+voice message. `language="auto"` enables language detection. The downloaded audio
+is passed to the same optional speech engine used by the WhatsApp account
+prototype. It returns text without storing the transcript or sending a reply.
+The feature returns 503 when no engine is configured, before downloading media.
+
+Install the optional dependencies from this checkout:
+
+```bash
+python -m pip install '.[transcription]'
+```
+
+Provide an existing local CTranslate2 model directory with the constructor
+argument `transcription_model="/absolute/path/to/model"`, or with the same field
+in the `telegram_account(...)` grammar. Models are not downloaded implicitly.
+The shared worker uses offline faster-whisper, a subprocess, a five-minute audio
+limit and a 170-second worker timeout. The complete operation has a 180-second
+timeout and holds the account operation lock; cancellation terminates the worker.
+
+A trusted application may instead inject `transcriber=engine`, implementing
+`async transcribe(content, mimetype, language) -> dict`. The MCP caller cannot
+choose a server path, executable or external endpoint. Hosted speech recognition
+is never selected implicitly.
+
+### Forwarding, polls and scheduling
+
+Forwarding requires the `forward_message` grant and destination `write`, plus
+`get_messages` and source `read`. Source and destination are checked before the
+forward request. Numeric IDs and message membership are validated explicitly.
+Contact listing filters by readable user IDs before pagination.
+
+Polls are anonymous, with two to ten unique options. `get_poll` returns option
+indexes and the provider's current counts; missing counts remain null. Use these
+indexes in `vote_poll`; an empty list requests vote retraction. Telegram may
+reject voting in a closed poll or a disallowed chat. Poll closing and quizzes
+are not included in these additions.
+
+`schedule_message` accepts `due` as ISO 8601 with timezone, within one year.
+Telegram stores the scheduled message, so stopping the application does not
+cancel it. `get_scheduled_messages` is paginated; cancellation uses the returned
+scheduled-message ID, which must not be confused with a delivered-message ID.
+This is native Telegram scheduling, without the WhatsApp prototype's local
+approval queue. Once submitted, later local policy changes do not cancel it:
+use `cancel_scheduled_message` explicitly while the caller has permission.
+
+### Verification and remaining differences
+
+Tests use a fake Telegram transport, actual Telethon request types and real TL
+serialization for polls. They cover deny-by-default policy, cross-chat forwarding,
+media limits, transcription delegation, invalid inputs and caller-filtered MCP
+discovery. They do not send messages or change a real Telegram account.
+
+These additions do not establish full parity with the WhatsApp prototype.
+Telegram account privacy settings, profile/group photos, admission workflows,
+a persistent event journal, local approvals and audit history remain separate
+work. Existing encrypted session persistence is preserved. Multiple accounts
+continue to use separate application mounts and state files.

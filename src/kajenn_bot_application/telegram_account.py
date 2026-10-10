@@ -37,7 +37,8 @@ import base64
 import binascii
 import copy
 import io
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -51,11 +52,31 @@ from kajenn.application import ApplicationGrammar
 from kajenn.applications.mcp import McpOpenApiApplication
 from kajenn.exceptions import HTTPBadRequest, HTTPException, HTTPForbidden
 from kajenn.response import Response
+from .transcription import _LocalTranscriber
 from .account_store import _AccountStore
 from .account_routes import _AccountOperations, _AccountAdministration
 
 # Chat grant required by each operation; None marks an account-wide operation.
 ACCOUNT_OPERATIONS = {
+    "download_media": 'read',
+    "transcribe_message": 'read',
+    "react_message": 'write',
+    "mark_read": 'write',
+    "archive_chat": 'write',
+    "mute_chat": 'write',
+    "pin_message": 'admin',
+    "block_contact": 'admin',
+    "set_profile": None,
+    "get_contacts": None,
+    "forward_message": 'write',
+    "schedule_message": 'write',
+    "get_scheduled_messages": 'read',
+    "cancel_scheduled_message": 'write',
+    "create_poll": 'write',
+    "get_poll": 'read',
+    "vote_poll": 'write',
+    "send_media": 'write',
+
     "get_chats": "read",
     "get_messages": "read",
     "get_members": "read",
@@ -94,6 +115,7 @@ class _AccountGrammar(ApplicationGrammar):
         session_path: str | BagResolver,
         encryption_key: str | BagResolver,
         policy: dict | None = None,
+        transcription_model: str | BagResolver | None = None,
     ) -> None:
         """Local account credentials, encrypted state and initial operation/chat grants."""
 
@@ -112,6 +134,8 @@ class TelegramAccountApplication(McpOpenApiApplication):
         encryption_key=None,
         policy=None,
         client_factory=TelegramClient,
+        transcriber=None,
+        transcription_model=None,
         **kwargs,
     ):
         self._settings = dict(
@@ -120,7 +144,9 @@ class TelegramAccountApplication(McpOpenApiApplication):
             session_path=session_path,
             encryption_key=encryption_key,
             policy=policy,
+            transcription_model=transcription_model,
         )
+        self.transcriber = transcriber
         self._factory = client_factory
         self._client = None
         self._store = None
@@ -182,6 +208,8 @@ class TelegramAccountApplication(McpOpenApiApplication):
         async with self.lock:
             if self._client is not None:
                 return
+            if self.transcriber is None and self._setting("transcription_model"):
+                self.transcriber = _LocalTranscriber(self._setting("transcription_model"))
             api_id, api_hash = self._setting("api_id"), self._setting("api_hash")
             if (
                 not isinstance(api_id, int)
@@ -398,13 +426,13 @@ class TelegramAccountApplication(McpOpenApiApplication):
             if not self._allowed_chat(chat_id, ACCOUNT_OPERATIONS[operation]):
                 raise HTTPForbidden("account operation is not permitted in this chat")
 
-    async def _run(self, operation, chat_id, handler, *args) -> dict[str, Any]:
+    async def _run(self, operation, chat_id, handler, *args, timeout=45) -> dict[str, Any]:
         async with self.lock:
             self._require_permission(operation, chat_id)
             if not self._authorized:
                 raise HTTPException(409, "personal Telegram account requires local login")
             try:
-                async with asyncio.timeout(45):
+                async with asyncio.timeout(timeout):
                     result: dict[str, Any] = await handler(*args)
                 self._save()
                 return result
@@ -777,3 +805,266 @@ class TelegramAccountApplication(McpOpenApiApplication):
             is_admin=bool(rights),
         )
         return {"chat_id": chat_id, "user_id": user_id, "rights": rights}
+
+    async def download_media(self, chat_id: int, message_id: int) -> dict:
+        self._message_id(message_id)
+        return await self._run("download_media", chat_id, self._extra_download_media, chat_id, message_id)
+
+    async def _extra_download_media(self, chat_id: int, message_id: int):
+        message = await self._selected_message(chat_id, message_id)
+        content, mime = await self._media_bytes(message)
+        return {"chat_id": chat_id, "message_id": message_id, "content_base64": base64.b64encode(content).decode(), "mimetype": mime, "size": len(content)}
+
+    async def transcribe_message(self, chat_id: int, message_id: int, language: str = "it") -> dict:
+        self._message_id(message_id)
+        if not isinstance(language, str) or not re.fullmatch(r"(?:auto|[a-z]{2,3})", language):
+            raise HTTPBadRequest("Invalid language code")
+        return await self._run("transcribe_message", chat_id, self._extra_transcribe_message, chat_id, message_id, language, timeout=180)
+
+    async def _extra_transcribe_message(self, chat_id: int, message_id: int, language: str = "it"):
+        if self.transcriber is None:
+            raise HTTPException(503, "No transcription engine is configured")
+        message = await self._selected_message(chat_id, message_id)
+        if not message.voice and not message.audio:
+            raise HTTPBadRequest("The selected message must contain audio")
+        content, mime = await self._media_bytes(message)
+        result = await self.transcriber.transcribe(content, mime, language)
+        return {"chat_id": chat_id, "message_id": message_id, **result}
+
+    async def react_message(self, chat_id: int, message_id: int, reaction: str) -> dict:
+        self._message_id(message_id)
+        if not isinstance(reaction, str) or len(reaction) > 32:
+            raise HTTPBadRequest("Invalid reaction")
+        return await self._run("react_message", chat_id, self._extra_react_message, chat_id, message_id, reaction)
+
+    async def _extra_react_message(self, chat_id: int, message_id: int, reaction: str):
+        await self._selected_message(chat_id, message_id)
+        await self.client(functions.messages.SendReactionRequest(await self._entity(chat_id), message_id,
+                          reaction=[types.ReactionEmoji(reaction)] if reaction else []))
+        return {"status": "returned"}
+
+    async def mark_read(self, chat_id: int, message_id: int) -> dict:
+        self._message_id(message_id)
+        return await self._run("mark_read", chat_id, self._extra_mark_read, chat_id, message_id)
+
+    async def _extra_mark_read(self, chat_id: int, message_id: int):
+        await self._selected_message(chat_id, message_id)
+        await self.client.send_read_acknowledge(await self._entity(chat_id), max_id=message_id)
+        return {"status": "returned"}
+
+    async def archive_chat(self, chat_id: int, archived: bool = True) -> dict:
+        if type(archived) is not bool:
+            raise HTTPBadRequest("archived must be boolean")
+        return await self._run("archive_chat", chat_id, self._extra_archive_chat, chat_id, archived)
+
+    async def _extra_archive_chat(self, chat_id: int, archived: bool = True):
+        await self.client.edit_folder(await self._entity(chat_id), folder=1 if archived else 0)
+        return {"status": "returned"}
+
+    async def mute_chat(self, chat_id: int, muted: bool = True) -> dict:
+        if type(muted) is not bool:
+            raise HTTPBadRequest("muted must be boolean")
+        return await self._run("mute_chat", chat_id, self._extra_mute_chat, chat_id, muted)
+
+    async def _extra_mute_chat(self, chat_id: int, muted: bool = True):
+        until = datetime(2038, 1, 1, tzinfo=timezone.utc) if muted else datetime(1970, 1, 1, tzinfo=timezone.utc)
+        await self.client(functions.account.UpdateNotifySettingsRequest(
+            types.InputNotifyPeer(await self._entity(chat_id)), types.InputPeerNotifySettings(mute_until=until)))
+        return {"status": "returned"}
+
+    async def pin_message(self, chat_id: int, message_id: int, pinned: bool = True) -> dict:
+        self._message_id(message_id)
+        if type(pinned) is not bool:
+            raise HTTPBadRequest("pinned must be boolean")
+        return await self._run("pin_message", chat_id, self._extra_pin_message, chat_id, message_id, pinned)
+
+    async def _extra_pin_message(self, chat_id: int, message_id: int, pinned: bool = True):
+        await self._selected_message(chat_id, message_id)
+        await self.client(functions.messages.UpdatePinnedMessageRequest(await self._entity(chat_id), message_id, silent=True, unpin=not pinned))
+        return {"status": "returned"}
+
+    async def block_contact(self, chat_id: int, blocked: bool = True) -> dict:
+        if type(blocked) is not bool:
+            raise HTTPBadRequest("blocked must be boolean")
+        if type(chat_id) is not int or chat_id <= 0:
+            raise HTTPBadRequest("A positive personal user ID is required")
+        return await self._run("block_contact", chat_id, self._extra_block_contact, chat_id, blocked)
+
+    async def _extra_block_contact(self, chat_id: int, blocked: bool = True):
+        request = functions.contacts.BlockRequest if blocked else functions.contacts.UnblockRequest
+        await self.client(request(await self._entity(chat_id)))
+        return {"status": "returned"}
+
+    async def set_profile(self, first_name: str, last_name: str = "", about: str = "") -> dict:
+        if not isinstance(first_name, str) or len(first_name) > 64 or not first_name.strip():
+            raise HTTPBadRequest("Invalid first_name")
+        if not isinstance(last_name, str) or len(last_name) > 64:
+            raise HTTPBadRequest("Invalid last_name")
+        if not isinstance(about, str) or len(about) > 70:
+            raise HTTPBadRequest("Invalid about")
+        return await self._run("set_profile", None, self._extra_set_profile, first_name, last_name, about)
+
+    async def _extra_set_profile(self, first_name: str, last_name: str = "", about: str = ""):
+        await self.client(functions.account.UpdateProfileRequest(first_name=first_name,last_name=last_name,about=about))
+        return {"status": "returned"}
+
+    async def get_contacts(self, limit: int = 100, offset: int = 0) -> dict:
+        self._limit(limit)
+        self._offset(offset)
+        return await self._run("get_contacts", None, self._extra_get_contacts, limit, offset)
+
+    async def _extra_get_contacts(self, limit: int = 100, offset: int = 0):
+        result = await self.client(functions.contacts.GetContactsRequest(hash=0))
+        items = [self._person(user) for user in result.users if self._allowed_chat(user.id, "read")]
+        return {"items": items[offset:offset+limit], "next_offset": offset+limit if len(items)>offset+limit else None}
+
+    async def forward_message(self, chat_id: int, source_chat_id: int, message_id: int) -> dict:
+        self._message_id(message_id)
+        return await self._run("forward_message", chat_id, self._extra_forward_message, chat_id, source_chat_id, message_id)
+
+    async def _extra_forward_message(self, chat_id: int, source_chat_id: int, message_id: int):
+        self._require_permission("get_messages", source_chat_id)
+        await self._selected_message(source_chat_id, message_id)
+        result = await self.client.forward_messages(await self._entity(chat_id), message_id,
+                                                    from_peer=await self._entity(source_chat_id))
+        return self._message(result)
+
+    async def schedule_message(self, chat_id: int, text: str, due: str) -> dict:
+        if not isinstance(text, str) or len(text) > 4096 or not text.strip():
+            raise HTTPBadRequest("Invalid text")
+        date = self._date(due)
+        if date is None or not datetime.now(timezone.utc) < date < datetime.now(timezone.utc) + timedelta(days=366):
+            raise HTTPBadRequest("due must be a future date within one year")
+        return await self._run("schedule_message", chat_id, self._extra_schedule_message, chat_id, text, due)
+
+    async def _extra_schedule_message(self, chat_id: int, text: str, due: str):
+        result = await self.client.send_message(await self._entity(chat_id), text, parse_mode=None, schedule=self._date(due))
+        return {**self._message(result), "status": "scheduled"}
+
+    async def get_scheduled_messages(self, chat_id: int, limit: int = 100, offset: int = 0) -> dict:
+        self._limit(limit)
+        self._offset(offset)
+        return await self._run("get_scheduled_messages", chat_id, self._extra_get_scheduled_messages, chat_id, limit, offset)
+
+    async def _extra_get_scheduled_messages(self, chat_id: int, limit, offset):
+        result = await self.client(functions.messages.GetScheduledHistoryRequest(await self._entity(chat_id), hash=0))
+        return {"items": [self._message(message) for message in result.messages[offset:offset+limit]],
+                "next_offset": offset+limit if len(result.messages)>offset+limit else None}
+
+    async def cancel_scheduled_message(self, chat_id: int, message_id: int) -> dict:
+        self._message_id(message_id)
+        return await self._run("cancel_scheduled_message", chat_id, self._extra_cancel_scheduled_message, chat_id, message_id)
+
+    async def _extra_cancel_scheduled_message(self, chat_id: int, message_id: int):
+        entity = await self._entity(chat_id)
+        result = await self.client(functions.messages.GetScheduledHistoryRequest(entity, hash=0))
+        if not any(message.id == message_id and message.out for message in result.messages):
+            raise HTTPBadRequest("Scheduled outgoing message not found")
+        await self.client(functions.messages.DeleteScheduledMessagesRequest(entity, [message_id]))
+        return {"status": "returned"}
+
+    async def create_poll(self, chat_id: int, question: str, options: list[str], multiple_choice: bool = False) -> dict:
+        if not isinstance(question, str) or len(question) > 255 or not question.strip():
+            raise HTTPBadRequest("Invalid question")
+        if type(multiple_choice) is not bool:
+            raise HTTPBadRequest("multiple_choice must be boolean")
+        if not isinstance(options, list) or not 2 <= len(options) <= 10:
+            raise HTTPBadRequest("Polls require two to ten options")
+        for option in options:
+            self._text(option, 100)
+        if len(set(options)) != len(options):
+            raise HTTPBadRequest("Poll options must be unique")
+        return await self._run("create_poll", chat_id, self._extra_create_poll, chat_id, question, options, multiple_choice)
+
+    async def _extra_create_poll(self, chat_id: int, question: str, options: list[str], multiple_choice: bool = False):
+        answers = [types.PollAnswer(types.TextWithEntities(text=option, entities=[]), bytes([i])) for i, option in enumerate(options)]
+        poll = types.Poll(id=0, question=types.TextWithEntities(text=question, entities=[]), answers=answers, hash=0, multiple_choice=multiple_choice)
+        result = await self.client.send_message(await self._entity(chat_id), file=types.InputMediaPoll(poll))
+        return self._message(result)
+
+    async def get_poll(self, chat_id: int, message_id: int) -> dict:
+        self._message_id(message_id)
+        return await self._run("get_poll", chat_id, self._extra_get_poll, chat_id, message_id)
+
+    async def _extra_get_poll(self, chat_id: int, message_id: int):
+        message = await self._selected_message(chat_id, message_id)
+        if not isinstance(message.media, types.MessageMediaPoll):
+            raise HTTPBadRequest("Selected message is not a poll")
+        poll, results = message.media.poll, message.media.results
+        counts = {item.option: item.voters for item in results.results or []}
+        return {"message_id": message_id, "question": poll.question.text, "closed": bool(poll.closed),
+                "multiple_choice": bool(poll.multiple_choice), "total_voters": results.total_voters,
+                "partial": bool(results.min), "options": [{"index": i, "text": answer.text.text,
+                "voters": counts.get(answer.option)} for i, answer in enumerate(poll.answers)]}
+
+    async def vote_poll(self, chat_id: int, message_id: int, choices: list[int]) -> dict:
+        self._message_id(message_id)
+        if not isinstance(choices, list) or len(choices)>10 or any(type(i) is not int or i<0 for i in choices):
+            raise HTTPBadRequest("choices must be bounded nonnegative integer indexes")
+        if len(set(choices)) != len(choices):
+            raise HTTPBadRequest("Choices must be unique")
+        return await self._run("vote_poll", chat_id, self._extra_vote_poll, chat_id, message_id, choices)
+
+    async def _extra_vote_poll(self, chat_id: int, message_id: int, choices: list[int]):
+        message = await self._selected_message(chat_id, message_id)
+        if not isinstance(message.media, types.MessageMediaPoll):
+            raise HTTPBadRequest("Selected message is not a poll")
+        poll = message.media.poll
+        if any(i >= len(poll.answers) for i in choices) or (not poll.multiple_choice and len(choices)>1):
+            raise HTTPBadRequest("Selection does not match the poll")
+        await self.client(functions.messages.SendVoteRequest(await self._entity(chat_id), message_id,
+                          [poll.answers[i].option for i in choices]))
+        return {"status": "returned"}
+
+    def _message_id(self, value):
+        if type(value) is not int or not 0 < value <= 2147483647:
+            raise HTTPBadRequest("message_id must be a positive integer")
+
+    async def _selected_message(self, chat_id, message_id):
+        messages = await self.client.get_messages(await self._entity(chat_id), ids=[message_id])
+        if not messages or messages[0] is None or messages[0].chat_id != chat_id:
+            raise HTTPBadRequest("Message not found in the selected chat")
+        return messages[0]
+
+    async def _media_bytes(self, message):
+        limit = 5 * 1024 * 1024
+        if not message.file or not message.file.size or message.file.size > limit:
+            raise HTTPBadRequest("Media size must be known and at most 5 MiB")
+        content = bytearray()
+        async for chunk in self.client.iter_download(message.media):
+            if len(content) + len(chunk) > limit:
+                raise HTTPBadRequest("Downloaded media exceeds 5 MiB")
+            content.extend(chunk)
+        if not content:
+            raise HTTPBadRequest("Media contains no bytes")
+        return bytes(content), message.file.mime_type or "application/octet-stream"
+
+    async def send_media(self, chat_id, kind, filename, content_base64, caption="") -> dict:
+        if kind not in ("photo", "video", "audio", "voice", "sticker"):
+            raise HTTPBadRequest("Unsupported media kind")
+        if not isinstance(filename, str) or not filename or len(filename)>255 or any(c in filename for c in ("/", "\\", "\x00")):
+            raise HTTPBadRequest("filename must be a simple display name")
+        if not isinstance(content_base64, str) or len(content_base64)>4*((5*1024*1024+2)//3):
+            raise HTTPBadRequest("Media exceeds 5 MiB")
+        try:
+            content = base64.b64decode(content_base64, validate=True)
+        except ValueError:
+            raise HTTPBadRequest("Invalid base64") from None
+        if not content or len(content)>5*1024*1024:
+            raise HTTPBadRequest("Media must contain 1 byte to 5 MiB")
+        if not isinstance(caption, str) or len(caption)>1024:
+            raise HTTPBadRequest("Invalid caption")
+        if kind in ("voice", "sticker") and caption:
+            raise HTTPBadRequest("This media kind does not support captions")
+        return await self._run("send_media", chat_id, self._send_typed_media,
+                               chat_id, kind, filename, content, caption)
+
+    async def _send_typed_media(self, chat_id, kind, filename, content, caption):
+        stream = io.BytesIO(content)
+        stream.name = filename
+        result = await self.client.send_file(await self._entity(chat_id), stream,
+            caption=caption, parse_mode=None, voice_note=kind == "voice",
+            supports_streaming=kind == "video", force_document=kind in ("audio", "voice", "sticker"),
+            attributes=[types.DocumentAttributeSticker(alt="", stickerset=types.InputStickerSetEmpty())]
+            if kind == "sticker" else None)
+        return self._message(result)

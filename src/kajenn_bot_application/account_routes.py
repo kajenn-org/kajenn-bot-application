@@ -16,13 +16,15 @@
 
 from typing import TYPE_CHECKING
 
+from .account_extra_routes import _AccountExtraRoutes
+
 from genro_routes import RoutingClass, route
 
 if TYPE_CHECKING:
     from .telegram_account import TelegramAccountApplication
 
 
-class _AccountOperations(RoutingClass):
+class _AccountOperations(_AccountExtraRoutes):
     def __init__(self, application: "TelegramAccountApplication"):
         self.application: TelegramAccountApplication
         self.application = application

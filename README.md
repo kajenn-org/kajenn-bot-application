@@ -50,6 +50,11 @@ local and policy management is restricted to an administrator.
 See the [personal account guide](docs/guides/telegram-account.md). Personal account
 access and REST/MCP bot administration are included in the **0.2.0b1 beta**.
 
+The current source checkout expands the personal Telegram account to **32 MCP
+tools**, including media, local voice transcription, reactions, contacts, polls
+and native Telegram scheduling. Install `.[transcription]` for the optional
+shared local speech engine. These additions are not yet in the PyPI release.
+
 ## Personal WhatsApp account prototype
 
 The source-tree `examples/whatsapp_account` application exposes 76 authenticated

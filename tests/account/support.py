@@ -170,3 +170,8 @@ class FakeTelegram:
                 )
             ]
         )
+
+    async def iter_download(self, media):
+        self.calls.append(("download", media))
+        for chunk in self.download_chunks:
+            yield chunk
