@@ -115,3 +115,28 @@ class _AccountExtraRoutes(RoutingClass):
     async def send_media(self, chat_id: int, kind: str, filename: str, content_base64: str, caption: str = "") -> dict:
         """Send photo, video, audio, voice or sticker bytes; never read server paths."""
         return await self.application.send_media(chat_id, kind, filename, content_base64, caption)
+
+    @route(channel_channels="mcp,rest", auth_rule="telegram_account", openapi_method="post")
+    async def get_events(self, after_id: int = 0, limit: int = 100) -> dict:
+        """Replay permitted message event identifiers from the encrypted local journal."""
+        return await self.application.get_events(after_id, limit)
+
+    @route(channel_channels="mcp,rest", auth_rule="admin", openapi_method="post")
+    async def get_audit_log(self, after_id: int = 0, limit: int = 100) -> dict:
+        """Read bounded operation outcomes and authenticated callers; excludes message text."""
+        return await self.application.get_audit_log(after_id, limit)
+
+    @route(channel_channels="mcp,rest", auth_rule="telegram_account", openapi_method="post")
+    async def request_message(self, chat_id: int, text: str) -> dict:
+        """Queue a text for explicit administrator approval without sending it."""
+        return await self.application.request_message(chat_id, text)
+
+    @route(channel_channels="mcp,rest", auth_rule="telegram_account|admin", openapi_method="post")
+    async def get_message_requests(self, limit: int = 100, offset: int = 0) -> dict:
+        """Inspect queued texts and decisions for readable chats."""
+        return await self.application.get_message_requests(limit, offset)
+
+    @route(channel_channels="mcp,rest", auth_rule="admin", openapi_method="post")
+    async def decide_message(self, request_id: str, decision: str) -> dict:
+        """Approve and send once, reject or cancel a pending text; first decision wins."""
+        return await self.application.decide_message(request_id, decision)

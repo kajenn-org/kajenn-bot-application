@@ -27,7 +27,7 @@ serialized with policy and lifecycle changes; status reads never wait for them.
 Startup preserves stored authorization on transient errors. Encrypted state is
 written only when its contents change. Tools send supplied document
 bytes, never arbitrary server files. The calling client owns user confirmation;
-the server enforces configured grants and does not infer approval from tool text.
+the server enforces configured grants and offers explicit approval for queued texts.
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ import binascii
 import copy
 import io
 import re
+from contextvars import ContextVar
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
@@ -45,7 +46,7 @@ from typing import Any
 from genro_bag import BagResolver
 
 from genro_builders.builder import element
-from telethon import TelegramClient, errors, functions, types, utils
+from telethon import TelegramClient, errors, events, functions, types, utils
 from telethon.sessions import StringSession
 
 from kajenn.application import ApplicationGrammar
@@ -54,10 +55,16 @@ from kajenn.exceptions import HTTPBadRequest, HTTPException, HTTPForbidden
 from kajenn.response import Response
 from .transcription import _LocalTranscriber
 from .account_store import _AccountStore
+from .account_journal import _AccountJournal
 from .account_routes import _AccountOperations, _AccountAdministration
 
 # Chat grant required by each operation; None marks an account-wide operation.
 ACCOUNT_OPERATIONS = {
+    "get_events": None,
+    "get_audit_log": None,
+    "request_message": "write",
+    "get_message_requests": None,
+    "decide_message": "write",
     "download_media": 'read',
     "transcribe_message": 'read',
     "react_message": 'write',
@@ -158,6 +165,10 @@ class TelegramAccountApplication(McpOpenApiApplication):
         self._phone_code_hash = None
         self._password_pending = False
         self._lock = asyncio.Lock()
+        self.journal = None
+        self.scope_context = ContextVar("telegram_account_scope", default=None)
+        self.event_errors = 0
+        self.unscoped_deletions = 0
         kwargs.setdefault("mcp_name_segment", "_mcp")
         kwargs.setdefault("api_name", "_account")
         super().__init__(routing_class=_AccountOperations(self), **kwargs)
@@ -202,7 +213,23 @@ class TelegramAccountApplication(McpOpenApiApplication):
                 scope, receive, send
             )
             return
-        await super().__call__(scope, receive, send)
+        token = self.scope_context.set(scope)
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self.scope_context.reset(token)
+
+    @property
+    def actor(self):
+        scope = self.scope_context.get()
+        if scope is None:
+            return "trusted-python"
+        avatar = scope.get("auth")
+        return str(avatar.identity) if avatar is not None else "anonymous"
+
+    @property
+    def account_id(self):
+        return self._account["id"] if self._account else None
 
     async def on_startup(self):
         async with self.lock:
@@ -249,12 +276,18 @@ class TelegramAccountApplication(McpOpenApiApplication):
                             "session does not belong to the configured personal account"
                         )
                     self._account = self._person(me)
+                self.journal = _AccountJournal(
+                    self.session_path.with_name(self.session_path.name + ".journal.enc"), key)
+                self.journal.open()
                 self._save()
             except BaseException:
                 try:
                     if self._client is not None:
                         await self.client.disconnect()
                 finally:
+                    if self.journal is not None:
+                        self.journal.close()
+                        self.journal = None
                     self._client = None
                     self._authorized = False
                     self._account = None
@@ -272,22 +305,29 @@ class TelegramAccountApplication(McpOpenApiApplication):
                         await self.client.disconnect()
                     finally:
                         self._client = None
+                        if self.journal is not None:
+                            self.journal.close()
+                            self.journal = None
                         self.store.close()
                         self._store = None
                         self._clear_login()
 
     def _new_client(self, session=""):
-        return self._factory(
+        client = self._factory(
             StringSession(session),
             self._setting("api_id"),
             self._setting("api_hash"),
             device_model="kajenn Telegram account",
-            receive_updates=False,
+            receive_updates=True,
             flood_sleep_threshold=0,
             request_retries=0,
             connection_retries=2,
             raise_last_call_error=True,
         )
+        client.add_event_handler(self._record_event, events.NewMessage())
+        client.add_event_handler(self._record_event, events.MessageEdited())
+        client.add_event_handler(self._record_event, events.MessageDeleted())
+        return client
 
     def _save(self, policy=None):
         state = {
@@ -357,6 +397,8 @@ class TelegramAccountApplication(McpOpenApiApplication):
             "connected": self.client.is_connected(),
             "authorized": self._authorized,
             "account": copy.deepcopy(self._account),
+            "event_errors": self.event_errors,
+            "unscoped_deletions": self.unscoped_deletions,
         }
 
     async def get_policy(self) -> dict:
@@ -428,35 +470,149 @@ class TelegramAccountApplication(McpOpenApiApplication):
 
     async def _run(self, operation, chat_id, handler, *args, timeout=45) -> dict[str, Any]:
         async with self.lock:
-            self._require_permission(operation, chat_id)
+            account_id = self.account_id
+            self._audit(account_id, operation, chat_id, "started")
+            try:
+                result = await self._execute(operation, chat_id, handler, *args, timeout=timeout)
+            except BaseException as exc:
+                self._audit(account_id, operation, chat_id, type(exc).__name__)
+                raise
+            self._audit(account_id, operation, chat_id, "returned")
+            return result
+
+    def _audit(self, account_id, operation, chat_id, outcome):
+        if self.journal is not None:
+            self.journal.append("audit", account_id, operation=operation,
+                                chat_id=chat_id if isinstance(chat_id, int) else None,
+                                actor=self.actor, outcome=outcome)
+
+    async def _execute(self, operation, chat_id, handler, *args, timeout=45) -> dict[str, Any]:
+        self._require_permission(operation, chat_id)
+        if not self._authorized:
+            raise HTTPException(409, "personal Telegram account requires local login")
+        try:
+            async with asyncio.timeout(timeout):
+                result: dict[str, Any] = await handler(*args)
+            self._save()
+            return result
+        except errors.FloodWaitError as exc:
+            raise HTTPException(
+                429,
+                f"Telegram rate limit; retry after {exc.seconds} seconds",
+                headers=[(b"retry-after", str(exc.seconds).encode())],
+            ) from None
+        except errors.UnauthorizedError:
+            self._authorized = False
+            self._account = None
+            self._save()
+            raise HTTPException(
+                409, "Telegram session was revoked; local login is required"
+            ) from None
+        except errors.RPCError as exc:
+            raise HTTPException(
+                502, f"Telegram rejected the operation: {type(exc).__name__}"
+            ) from None
+        except (TimeoutError, ConnectionError, OSError):
+            raise HTTPException(
+                503, "Telegram operation outcome is uncertain; inspect before retrying"
+            ) from None
+
+    async def _record_event(self, event):
+        async with self.lock:
+            if (self.journal is None or not self._authorized
+                    or event.client is not self._client):
+                return
+            chat_id = event.chat_id
+            if chat_id is None:
+                if isinstance(event, events.MessageDeleted.Event):
+                    self.unscoped_deletions += len(event.deleted_ids)
+                return
+            if not self._allowed_chat(chat_id, "read"):
+                return
+            if isinstance(event, events.MessageDeleted.Event):
+                kind, ids = "message_deleted", event.deleted_ids
+            elif isinstance(event, events.MessageEdited.Event):
+                kind, ids = "message_edited", [event.message.id]
+            else:
+                kind, ids = "message_received", [event.message.id]
+            try:
+                for message_id in ids:
+                    self.journal.append("events", self.account_id, kind=kind,
+                                        chat_id=chat_id, message_id=message_id)
+            except Exception:
+                # Telethon logs callback exceptions; expose a content-free counter as well.
+                self.event_errors += 1
+                raise
+
+    async def get_events(self, after_id: int = 0, limit: int = 100) -> dict:
+        self._cursor(after_id)
+        self._limit(limit)
+        return await self._run("get_events", None, self._get_events, after_id, limit)
+
+    async def _get_events(self, after_id, limit):
+        return self.journal.page("events", self.account_id, after_id, limit,
+                                 lambda item: self._allowed_chat(item["chat_id"], "read"))
+
+    async def get_audit_log(self, after_id: int = 0, limit: int = 100) -> dict:
+        self._cursor(after_id)
+        self._limit(limit)
+        # Reading audit must not append records: otherwise clients can never catch up.
+        async with self.lock:
+            self._require_permission("get_audit_log", None)
             if not self._authorized:
                 raise HTTPException(409, "personal Telegram account requires local login")
-            try:
-                async with asyncio.timeout(timeout):
-                    result: dict[str, Any] = await handler(*args)
-                self._save()
-                return result
-            except errors.FloodWaitError as exc:
-                raise HTTPException(
-                    429,
-                    f"Telegram rate limit; retry after {exc.seconds} seconds",
-                    headers=[(b"retry-after", str(exc.seconds).encode())],
-                ) from None
-            except errors.UnauthorizedError:
-                self._authorized = False
-                self._account = None
-                self._save()
-                raise HTTPException(
-                    409, "Telegram session was revoked; local login is required"
-                ) from None
-            except errors.RPCError as exc:
-                raise HTTPException(
-                    502, f"Telegram rejected the operation: {type(exc).__name__}"
-                ) from None
-            except (TimeoutError, ConnectionError, OSError):
-                raise HTTPException(
-                    503, "Telegram operation outcome is uncertain; inspect before retrying"
-                ) from None
+            result: dict = self.journal.page("audit", self.account_id, after_id, limit,
+                                     lambda item: item["chat_id"] is None
+                                     or self._allowed_chat(item["chat_id"], "read"))
+            return result
+
+    def _cursor(self, value):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise HTTPBadRequest("after_id must be a nonnegative integer")
+
+    async def request_message(self, chat_id: int, text: str) -> dict:
+        self._text(text)
+        return await self._run("request_message", chat_id, self._request_message, chat_id, text)
+
+    async def _request_message(self, chat_id, text):
+        return self.journal.enqueue(self.account_id, chat_id, text, self.actor)
+
+    async def get_message_requests(self, limit: int = 100, offset: int = 0) -> dict:
+        self._limit(limit)
+        self._offset(offset)
+        return await self._run("get_message_requests", None, self._get_message_requests,
+                               limit, offset)
+
+    async def _get_message_requests(self, limit, offset):
+        return self.journal.get_jobs(self.account_id, limit, offset,
+                                     lambda item: self._allowed_chat(item["chat_id"], "read"))
+
+    async def decide_message(self, request_id: str, decision: str) -> dict:
+        if not isinstance(request_id, str) or not request_id or len(request_id) > 100:
+            raise HTTPBadRequest("request_id must identify a queued message")
+        if decision not in ("approve", "reject", "cancel"):
+            raise HTTPBadRequest("decision must be approve, reject or cancel")
+        return await self._run("decide_message", None, self._decide_message,
+                               request_id, decision)
+
+    async def _decide_message(self, request_id, decision):
+        job = self.journal.get_job(self.account_id, request_id)
+        if job is None or not self._allowed_chat(job["chat_id"], "read"):
+            raise HTTPException(404, "message request not found")
+        self._require_permission("decide_message", job["chat_id"])
+        if job["state"] != "pending":
+            return job
+        if decision != "approve":
+            return self.journal.update_job(job, state="rejected" if decision == "reject"
+                                           else "cancelled", decision_actor=self.actor)
+        # Persist before touching the provider. Restart never resends a sending job.
+        job = self.journal.update_job(job, state="sending", decision_actor=self.actor)
+        try:
+            result = await self._send_text(job["chat_id"], job["text"], None)
+        except BaseException:
+            self.journal.update_job(job, state="unconfirmed")
+            raise
+        return self.journal.update_job(job, state="submitted", message_id=result["id"])
 
     def _limit(self, value, maximum=100):
         if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= maximum:

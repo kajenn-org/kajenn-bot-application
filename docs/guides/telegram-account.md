@@ -7,7 +7,7 @@ MTProto. It is a separate application in the same distribution as the Telegram
 and WhatsApp bots. It does not inherit bot registration, webhook processing or
 bot conversations. Multiple accounts require separate mounts, state files and
 keys. The base application is included in `0.2.0b1`. This source checkout extends it to
-32 operational MCP tools; the additions below are not yet published on PyPI.
+37 MCP tools; the additions below are not yet published on PyPI.
 
 Use it for a local developer service: an authenticated MCP client can read a
 permitted group's history, send a message, or create and administer a channel
@@ -181,11 +181,13 @@ mutations ordered. Status and policy reads do not join that queue. The encrypted
 file is written and synchronized only when the session, identity or policy
 changes, not after every history read.
 
-**Confirmations belong to the calling client.** Configure the MCP client to ask
-before sends, deletions, invitations and role changes. The application enforces
-grants but does not provide a second approval queue or treat tool arguments as
-proof of human approval. Administrators can constrain individual operation names
-in addition to chat categories.
+**Direct actions and queued approvals are distinct grants.** Configure the MCP
+client to confirm direct sends, deletions, invitations and role changes. For
+administrator-approved texts, grant `request_message` and `decide_message` but
+omit direct sending operations (including `send_text`, `send_media`,
+`send_document`, `forward_message` and `schedule_message`). An operator can then
+propose text but only an authenticated administrator can decide it. Neither a
+message nor a tool argument can claim the administrator role.
 
 ## Operations
 
@@ -286,7 +288,7 @@ No live account is required by the automated suite.
 
 ## Expanded account commands
 
-The account exposes 32 operational MCP tools. These eighteen additions use the
+The account exposes 37 MCP tools. The following eighteen extensions use the
 same `telegram_account` avatar role and independently checked operation policy.
 They are account operations, not Telegram Bot API commands.
 
@@ -372,7 +374,105 @@ media limits, transcription delegation, invalid inputs and caller-filtered MCP
 discovery. They do not send messages or change a real Telegram account.
 
 These additions do not establish full parity with the WhatsApp prototype.
-Telegram account privacy settings, profile/group photos, admission workflows,
-a persistent event journal, local approvals and audit history remain separate
-work. Existing encrypted session persistence is preserved. Multiple accounts
+Telegram account privacy settings, profile/group photos and admission workflows
+remain separate work. Existing encrypted session persistence is preserved. Multiple accounts
 continue to use separate application mounts and state files.
+
+
+## Persistent events, audit and approved texts
+
+These five additional tools are available through MCP and REST:
+
+| Tool | Avatar role | Operation and chat policy |
+|---|---|---|
+| `get_events(after_id=0, limit=100)` | `telegram_account` | `get_events`; read on returned chats |
+| `request_message(chat_id, text)` | `telegram_account` | `request_message`; write on destination |
+| `get_message_requests(limit=100, offset=0)` | `telegram_account` or `admin` | `get_message_requests`; read on returned chats |
+| `decide_message(request_id, decision)` | `admin` | `decide_message`; read and write on destination |
+| `get_audit_log(after_id=0, limit=100)` | `admin` | `get_audit_log`; read on chat-specific records |
+
+The server's existing avatar filtering controls discovery and invocation.
+Calling Python methods is a trusted administrative integration; it still checks
+operation/chat policy but has no HTTP avatar. Such audit records use
+`trusted-python`. Login, policy changes and session revocation remain outside MCP.
+
+### Event replay
+
+The connected Telethon client delivers new, edited and deleted message events;
+there is no application polling loop. The application stores identifiers and a
+local observation timestamp for readable chats, never message bodies. New
+message events (`message_received`) include incoming and outgoing messages.
+Events from unreadable chats are dropped on receipt, and current permissions
+are applied again before pagination. Use `get_messages` for authorized content.
+
+Save `next_after_id` and supply it as `after_id` on the next call; `has_more`
+indicates another page. The cursor survives application restarts.
+`retention_gap` reports records removed by the bounded journal. Replaying events
+is a pull API; it does not initiate MCP notifications or deliver callbacks to
+remote consumers. This is an observation journal, not a complete historical feed:
+updates missed while disconnected or before login are not backfilled. Duplicate
+provider events may produce multiple journal records.
+
+Telegram sometimes omits the chat from deletion updates. These updates are
+ignored rather than attributed to a guessed chat; `get_status` reports
+`unscoped_deletions`. Callback persistence failures increment `event_errors`.
+Both diagnostic counters reset when the application object is recreated. See
+[Telethon deletion events](https://docs.telethon.dev/en/stable/modules/events.html#telethon.events.messagedeleted.MessageDeleted)
+for provider coverage limitations.
+
+### Approval contract
+
+1. `request_message` persists an immutable text proposal in `pending` state and
+   returns its request ID, destination, text and proposing avatar identity.
+2. An administrator reviews it using `get_message_requests` and calls
+   `decide_message` with `approve`, `reject` or `cancel`.
+3. Approval rechecks the operation and destination grants, records the deciding
+   identity and `sending` state durably, then sends the exact stored text.
+4. A successful send becomes `submitted` with the provider message ID. Concurrent
+   or repeated decisions return the settled record without resending. Rejection
+   and cancellation are final and send nothing.
+
+`decide_message` is its own sending grant: it does not require `send_text`.
+This allows approval-only policies without enabling direct operator sends.
+For example, an administrator can configure:
+
+```json
+{
+  "operations": ["request_message", "get_message_requests", "decide_message", "get_events", "get_audit_log"],
+  "chats": {"-1001234567890": ["read", "write"]}
+}
+```
+
+A failed or cancelled provider call becomes `unconfirmed`, as does a `sending`
+record found at restart. No automatic retry occurs. Inspect Telegram before
+creating a replacement request. A submitted message cannot be cancelled through
+this queue; deleting it requires the separate `delete_messages` permission.
+Approval sends immediately and does not schedule background work. Native
+`schedule_message` remains a separate Telegram scheduling feature.
+
+Records are bound to the Telegram account ID. Logging in as another account does
+not expose or dispatch the previous account's jobs, audit or events. Changing
+back to the original account restores access subject to current grants.
+
+### Storage and audit scope
+
+The journal is an additional file named `<session_path>.journal.enc`, encrypted
+with the configured session key and restricted to mode 0600. It reuses the
+session store's exclusive lease and atomic replacement implementation. Keep the
+session and journal files together in backups. No additional storage service is
+required, and the session-file write-on-change contract is unchanged.
+
+Retention is 1,000 events, 1,000 audit entries and 1,000 text requests per mount.
+The oldest settled request is removed when space is needed; pending and
+unconfirmed requests are never silently discarded. A queue containing only
+unresolved requests rejects new proposals when full. Snapshots are rewritten
+atomically on each change; this filesystem implementation targets modest traffic.
+
+Audit records contain operation, authenticated identity, optional chat ID,
+timestamp and result category. They exclude text, credentials and provider
+exception details. They cover operations entering the execution wrapper, not
+HTTP requests rejected by routing/authentication, argument validation before the
+wrapper, status reads, local login, policy changes or session revocation. Queue
+records additionally retain the proposing and deciding identity. Reading audit
+does not itself append audit records. An audit persistence failure before an
+operation prevents that operation from reaching Telegram.
