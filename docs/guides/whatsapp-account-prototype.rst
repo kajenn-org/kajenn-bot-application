@@ -1,11 +1,11 @@
 WhatsApp account prototype
 ==========================
 
-Version: 0.1 — Last updated: 2026-10-10 — Status: UNDER REVIEW
+Version: 0.2 — Last updated: 2026-10-10 — Status: UNDER REVIEW
 
 This source-tree prototype evaluates a personal WhatsApp linked device using
-Tryx and whatsapp-rust. It is a local test harness, not an exported kajenn
-application or a released account integration. The existing WhatsApp application
+Tryx and whatsapp-rust. It includes a source-tree ``WhatsAppAccountApplication`` and a local test
+harness. It is not exported in the published package. The existing WhatsApp application
 continues to use the Business Cloud API.
 
 Scope and ownership
@@ -14,8 +14,8 @@ Scope and ownership
 The prototype provides explicit pairing, a persistent SQLite device store,
 exclusive process ownership, a bounded graceful stop, an explicit logout request,
 and an optional text-send probe. It counts live messages and history-sync batches
-without printing their contents. A history archive and REST/MCP routes belong to
-the next integration step.
+without printing their contents. An authenticated local server can also index observed contacts, chats and text
+messages and expose bounded queries through REST/MCP.
 
 The session directory must be private (0700); the database must be private (0600).
 Only one process may open a directory through this controller. A shutdown timeout
@@ -34,7 +34,7 @@ Build the experimental dependency
 Run commands from the repository root with Python 3.11 or newer, Git and Rust
 1.94.0 available. Building needs a native compiler and access to GitHub/crates.io.
 The builder fixes both upstream revisions and supplies a resolved Cargo lockfile.
-The wheel has the distinct local version ``1.5.0+kajenn.1``; it is not on PyPI.
+The wheel has the distinct local version ``1.5.0+kajenn.3``; it is not on PyPI.
 
 .. code-block:: console
 
@@ -44,11 +44,12 @@ The wheel has the distinct local version ``1.5.0+kajenn.1``; it is not on PyPI.
    .venv-account/bin/python examples/whatsapp_account/build_tryx.py temp/tryx-build
    .venv-account/bin/python -m pip install temp/tryx-build/dist/tryx-*.whl
 
-The small MIT-licensed patch adds three methods to ``AdvancedClient``:
+The MIT-licensed lifecycle patch adds three methods to ``AdvancedClient``:
 ``wait_for_client`` waits for local initialization, ``disconnect`` flushes and
 stops the connection, and ``logout`` requests companion-device removal before
 stopping. ``TRYX-LICENSE`` accompanies the patch. The repository's Python harness
-is Apache-2.0.
+is Apache-2.0. Additional patches expose app-state replay and fix nested
+Protobuf action lookup for contact and chat updates.
 
 Offline verification
 --------------------
@@ -87,19 +88,63 @@ Therefore the harness does not claim confirmed revocation or erase the saved
 state. Verify removal on the phone; remove the linked device there if necessary.
 Deleting a local file alone does not revoke a linked device.
 
-Before application integration
+Authenticated local MCP server
 ------------------------------
 
-The required live checks are pairing, reconnect after restart, graceful stop
-while receiving, transient network failure, a message to a designated test chat,
-history-sync observation and phone-confirmed revocation. They have not been
-performed by the offline test suite. A synchronized history batch does not promise
-access to every old message.
+After explicit pairing, start the server with the same private directory:
 
-A future ``WhatsAppAccountApplication`` can reuse kajenn's authenticated routing
-and operation/chat policy pattern. It must enforce policy where commands execute.
-A browser that owns its own session is a separate execution boundary; a server's
-MCP grants cannot constrain someone who also owns those local device credentials.
+.. code-block:: console
+
+   .venv-account/bin/python -m examples.whatsapp_account.server \
+     --session-dir "$HOME/.kajenn/whatsapp-test" --port 8766 --resync
+
+The endpoint is ``http://127.0.0.1:8766/whatsapp/_mcp``. The server creates a
+private ``mcp.token`` inside the session directory. A client must supply its
+contents as the ``Authorization: Bearer <token>`` header; never paste it into
+chat, logs or source control. This command does not register an MCP client or
+start a background system service. Stop it normally to flush the session.
+
+Authentication creates a local-owner avatar with the ``whatsapp_account`` tag.
+Kajenn filters tool discovery and execution using that avatar. The tools are:
+
+* ``get_status``: connection state, record counts, replay state and callback errors.
+* ``get_contacts``: bounded name search, preserving ambiguous matches.
+* ``get_chats``: observed conversations, excluding known archived chats by default.
+* ``get_messages``: locally retained text messages for an exact known JID.
+* ``send_text``: an explicitly requested message to an exact known JID.
+
+Contact lookup never chooses among names automatically. Sending requires a JID
+returned by contacts or chats; success means submitted, not delivered. Pairing,
+logout, credentials and resynchronization are not exposed as remote tools.
+This prototype grants all five tools to the owner; per-operation grants are not
+implemented here.
+
+``directory.db`` stores contacts, observed chat metadata and messages with private
+filesystem permissions, but without encryption. The session is held by one
+process. Contacts alone do not establish the existence of a chat. Names from the
+address book take precedence over profile names. Provider PN/LID aliases can be
+merged, but matching names alone are never sufficient.
+
+``--resync`` requests a snapshot replay of app-state metadata. A completed replay
+means events were dispatched, not that every callback succeeded; inspect
+``callback_errors`` and record counts. Results explicitly report partial
+coverage. The snapshot does not reconcile deleted contacts. The initial pairing
+harness counts history batches without retaining their contents: restarting the
+server cannot guarantee that those old messages will be resent. New history
+batches and live text messages are retained while the server runs. There is no
+claim of access to every old message or every chat visible on another device.
+Pagination bounds query size, not database retention; automatic retention is a
+future integration concern.
+
+Before publication
+------------------
+
+Further live checks include transient network failure, sending to a designated
+test chat, graceful shutdown while receiving and phone-confirmed revocation.
+The offline suite does not perform those operations. Production integration also
+needs encryption and key ownership, retention and more granular policy.
+A browser that owns its own session is a separate execution boundary; server MCP
+grants cannot constrain someone who owns the local device credentials.
 
 Browser path
 ------------

@@ -2854,7 +2854,7 @@ dependencies = [
 
 [[package]]
 name = "tryx"
-version = "1.5.0+kajenn.1"
+version = "1.5.0+kajenn.3"
 dependencies = [
  "async-channel",
  "async-trait",

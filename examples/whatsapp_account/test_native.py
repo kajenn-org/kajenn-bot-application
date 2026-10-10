@@ -15,10 +15,17 @@
 """Offline checks against the compiled Tryx extension; no client run loop starts."""
 
 import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from tryx.backend import SqliteStore
 from tryx.client import Tryx
+from tryx.types import JID
+from tryx.waproto.whatsapp_pb2 import HistorySync, SyncActionValue
+
+from examples.whatsapp_account.connection import _Connection
+from examples.whatsapp_account.directory import _Directory
 
 
 class TestNativeLifecycle:
@@ -26,7 +33,8 @@ class TestNativeLifecycle:
         runtime = Tryx(SqliteStore(str(tmp_path / "session.db"), 0))
         client = runtime.get_client()
         assert callable(client.advanced.wait_for_client)
-        for method in (client.advanced.disconnect, client.advanced.logout):
+        for method in (client.advanced.disconnect, client.advanced.logout,
+                       client.advanced.resync_directory):
             with pytest.raises(RuntimeError, match="not running"):
                 method()
 
@@ -45,3 +53,56 @@ class TestNativeLifecycle:
         reopened = SqliteStore(path, 0)
         assert await reopened.device_exists(device_id)
         assert any(device.id == device_id for device in await reopened.list_devices())
+
+
+class TestNativeDirectory:
+    async def test_protobuf_contact_archive_and_history(self, tmp_path):
+        connection = _Connection(tmp_path)
+        connection.directory = _Directory(tmp_path / "directory.db")
+        try:
+            contact = SyncActionValue.ContactAction(
+                fullName="Test Contact", pnJid="123@s.whatsapp.net", lidJid="456@lid")
+            await connection.on_contact(None, SimpleNamespace(data=SimpleNamespace(
+                jid=JID("123", "s.whatsapp.net"), action=contact)))
+            archive = SyncActionValue.ArchiveChatAction(archived=True)
+            await connection.on_archive(None, SimpleNamespace(data=SimpleNamespace(
+                jid=JID("123", "s.whatsapp.net"), action=archive)))
+            assert connection.directory.get_chats("", 50, 0, False)["items"] == []
+            assert connection.directory.get_chats("", 50, 0, True)["items"][0][
+                "id"] == "123@s.whatsapp.net"
+            assert len(connection.directory.get_contacts("test", 50, 0)["items"]) == 1
+            history = HistorySync()
+            chat = history.conversations.add(id="123@s.whatsapp.net", archived=False)
+            message = chat.messages.add().message
+            message.key.id = "test-history-message"
+            message.message.conversation = "History text"
+            message.messageTimestamp = 10
+            await connection.on_history(None, SimpleNamespace(proto=history))
+            assert len(connection.directory.get_chats("test", 50, 0, False)["items"]) == 1
+            assert connection.directory.get_messages("123@s.whatsapp.net", 50, 0)[
+                "items"][0]["text"] == "History text"
+        finally:
+            connection.directory.close()
+
+    async def test_callback_failure_is_visible_without_exposing_payload(self, tmp_path):
+        connection = _Connection(tmp_path)
+        await connection.guard(connection.on_contact)(None, SimpleNamespace())
+        assert connection.callback_errors == 1
+        assert connection.callback_failures == {"on_contact": "AttributeError"}
+
+
+    async def test_send_builds_native_jid_and_records_submitted_message(self, tmp_path):
+        connection = _Connection(tmp_path)
+        connection.directory = _Directory(tmp_path / "directory.db")
+        sender = AsyncMock(return_value="submitted-id")
+        connection.session.client = SimpleNamespace(send_text=sender)
+        try:
+            await connection.send_text("123@s.whatsapp.net", "Test text")
+            jid, text = sender.call_args.args
+            assert isinstance(jid, JID)
+            assert (jid.user, jid.server) == ("123", "s.whatsapp.net")
+            assert text == "Test text"
+            assert connection.directory.get_messages("123@s.whatsapp.net", 1, 0)[
+                "items"][0]["id"] == "submitted-id"
+        finally:
+            connection.directory.close()

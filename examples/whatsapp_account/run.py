@@ -76,7 +76,7 @@ class _Probe:
                 connected.cancel()
                 await asyncio.gather(connected, return_exceptions=True)
             if self.arguments.send_to:
-                await client.send_text(JID(self.arguments.send_to), self.arguments.text)
+                await client.send_text(JID(*self.arguments.send_to.rsplit("@", 1)), self.arguments.text)
                 print("Send operation returned; delivery has not been confirmed")
             if self.arguments.logout:
                 await self.session.stop(logout=True)

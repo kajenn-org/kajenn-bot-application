@@ -45,6 +45,9 @@ class _Builder:
         if revision != self.upstream["whatsapp_rust_commit"]:
             raise RuntimeError("Unexpected native dependency revision")
         self.execute("git", "apply", str(self.resources / "tryx-lifecycle.patch"))
+        self.execute("git", "apply", str(self.resources / "tryx-directory.patch"))
+        self.execute("git", "apply", str(self.resources / "tryx-protobuf.patch"))
+        self.execute("git", "apply", str(self.resources / "tryx-archive.patch"))
         shutil.copyfile(self.resources / "tryx.Cargo.lock", self.directory / "Cargo.lock")
         environment = dict(os.environ, RUSTUP_TOOLCHAIN=self.upstream["rust_toolchain"])
         subprocess.run(
